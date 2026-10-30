@@ -115,6 +115,7 @@ namespace
 int main(int argc, char **argv)
 {
     int vocab = 256, k = 40, seed = 20260421, threads = 4;
+    LookupBackend backend = LookupBackend::LogUpGkr;
     for (int i = 1; i < argc; ++i)
     {
         std::string o = argv[i];
@@ -123,6 +124,8 @@ int main(int argc, char **argv)
         else if (o == "--k") k = v();
         else if (o == "--seed") seed = v();
         else if (o == "--threads") threads = v();
+        else if (o == "--backend")
+            backend = std::string(argv[++i]) == "shout" ? LookupBackend::Shout : LookupBackend::LogUpGkr;
     }
 
     const ScopedOmpThreads thread_scope(threads);
@@ -206,7 +209,7 @@ int main(int argc, char **argv)
         decode_exp_digits_shift_override = [](ll) { return g; };
 
         ZkDecodeProver prover(srs.mv.pk, srs.mv.vk, threads);
-        prover.setLookupBackend(LookupBackend::LogUpGkr);
+        prover.setLookupBackend(backend);
         prover.setSoftmaxEpsilon(eps);
 
         // Honest sampler would derive the coin from the committed Theta; here we
@@ -223,7 +226,7 @@ int main(int argc, char **argv)
 
         ZkDecodeParameters p;
         p.kind = ZkDecodeProofKind::TopK;
-        p.lookup_backend = LookupBackend::LogUpGkr;
+        p.lookup_backend = backend;
         p.token_count = 1; p.vocab_size = vocab; p.k = k;
         p.bound = bound; p.theta = theta; p.epsilon_sm = eps;
         ZkDecodeVerifierKey key = prepareZkDecodeVerifierKey(p, srs.mv.pk, srs.mv.vk, threads);

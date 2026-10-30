@@ -11,7 +11,9 @@
 #include "model/attention_softmax.hpp"
 #include "model/quant_plan.hpp"
 
+#include <cstdlib>
 #include <iostream>
+#include <random>
 #include <set>
 #include <vector>
 
@@ -28,8 +30,15 @@ static std::ostream &operator<<(std::ostream &os, __int128 v)
     return os;
 }
 
-int main()
+int main(int argc, char **argv)
 {
+    int seed = 0, row_len = 8;
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string o = argv[i];
+        if (o == "--seed") seed = std::atoi(argv[++i]);
+        else if (o == "--row-len") row_len = std::atoi(argv[++i]);
+    }
     // A representative GPT-2 attention plan (Q=20), mirroring quant_plan defaults.
     QuantAttentionPlan plan;
     plan.score_scale = 7.952219286828541e-10;
@@ -46,8 +55,18 @@ int main()
 
     PreparedAttentionSoftmax prep(plan);
 
-    // One score row (length 8), bounded by score_bound.
-    vector<ll> scores = {120000, -35000, 80000, 15000, -90000, 42000, 5000, -12000};
+    // A score row bounded by score_bound. seed=0 keeps a fixed illustrative row;
+    // other seeds randomize it for the robustness sweep.
+    vector<ll> scores;
+    if (seed == 0)
+        scores = {120000, -35000, 80000, 15000, -90000, 42000, 5000, -12000};
+    else
+    {
+        std::mt19937_64 rng((uint64_t)seed);
+        std::uniform_int_distribution<int64_t> dist(-200000, 200000);
+        scores.resize(row_len);
+        for (auto &s : scores) s = dist(rng);
+    }
 
     auto build_with_zeta = [&](ll override_zeta, bool honest) -> AttentionSoftmaxRowWitness
     {
