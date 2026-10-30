@@ -69,4 +69,10 @@ ll decode_exp_digits_recommended_epsilon(
 
 int decode_exp_digit_bits(int base);
 
+// TEST INSTRUMENT (attacks/ only): lets a caller override the committed shift
+// zeta on the prover side. The verifier never reads this; it exists solely to
+// probe whether the verifier's acceptance region admits shifts other than the
+// honest one. Set to nullptr for honest behavior.
+extern ll (*decode_exp_digits_shift_override)(ll honest_shift);
+
 #endif
