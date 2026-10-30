@@ -72,7 +72,7 @@ def prefix_coin(ids):
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--model", default="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
-    ap.add_argument("--prompt", default="What is 7 times 8? Give a one-line answer.")
+    ap.add_argument("--prompt", default="")
     ap.add_argument("--k", type=int, default=40)
     ap.add_argument("--cap", type=int, default=500)
     args=ap.parse_args()
@@ -86,10 +86,13 @@ def main():
         s=tok.decode([int(i)]).strip()
         return any(s==w or s.startswith(w) for w in marker_words)
 
-    base=tok.apply_chat_template([{"role":"user","content":args.prompt}],
-                                 add_generation_prompt=True, return_tensors="pt", return_dict=True)["input_ids"]
+    PROMPTS=[args.prompt] if args.prompt else []
+    PROMPTS=PROMPTS or ["What is 7 times 8? Give a one-line answer.",
+             "Is 91 a prime number? Answer briefly.",
+             "What is the capital of Australia? One sentence.",
+             "Compute 12 + 15 and state the result."]
 
-    def run(mode):  # mode in {honest, freer, paper}
+    def run(mode, base):  # mode in {honest, freer, paper}
         ids=base.clone(); n=0; inj=0
         with torch.no_grad():
             while n<args.cap:
@@ -111,8 +114,11 @@ def main():
                 ids=torch.cat([ids,torch.tensor([[choose]])],dim=1); n+=1
                 if choose in terms: break
         return n, inj
-    Lh,_=run("honest"); print(f"honest billed length: {Lh}", flush=True)
-    Lf,fi=run("freer");  print(f"free-r  attack: length={Lf}  injections={fi}  inflation x{Lf/max(Lh,1):.2f}"+(" [cap]" if Lf>=args.cap else ""), flush=True)
-    Lp,pi=run("paper");  print(f"paper   attack: length={Lp}  injections={pi}  inflation x{Lp/max(Lh,1):.2f}"+(" [cap]" if Lp>=args.cap else ""), flush=True)
+    for pr in PROMPTS:
+        base=tok.apply_chat_template([{"role":"user","content":pr}],add_generation_prompt=True,return_tensors="pt",return_dict=True)["input_ids"]
+        Lh,_=run("honest",base)
+        Lf,fi=run("freer",base)
+        Lp,pi=run("paper",base)
+        print(f"PROMPT {pr!r}\n  honest={Lh} | free-r={Lf} (inj {fi}, x{Lf/max(Lh,1):.2f}){' [cap]' if Lf>=args.cap else ''} | paper={Lp} (inj {pi}, x{Lp/max(Lh,1):.2f}){' [cap]' if Lp>=args.cap else ''}", flush=True)
 
 if __name__=="__main__": main()
