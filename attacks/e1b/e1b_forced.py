@@ -49,7 +49,7 @@ def main():
         return n, forced
 
     for pi,p in enumerate(prompts):
-        ids=tok.apply_chat_template([{"role":"user","content":p}],add_generation_prompt=True,return_tensors="pt")
+        ids=tok.apply_chat_template([{"role":"user","content":p}],add_generation_prompt=True,return_tensors="pt",return_dict=True)["input_ids"]
         L,_=gen(ids,0,args.cap,dump=f"{args.outdir}/fe_{pi}.txt")
         print(f"\n[prompt {pi}] {p!r}\n  honest billed length (to first EOS): {L}", flush=True)
         for s in range(1,args.rounds+1):
