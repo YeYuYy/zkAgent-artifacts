@@ -52,3 +52,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# (appended) forced-extension variant: apply chat template, generate until the
+# model itself stops, and record which steps are natural stop points.
