@@ -75,6 +75,8 @@ def main():
     ap.add_argument("--prompt", default="")
     ap.add_argument("--k", type=int, default=40)
     ap.add_argument("--cap", type=int, default=500)
+    ap.add_argument("--skip-freer", action="store_true")
+    ap.add_argument("--ngrid", type=int, default=2000)
     args=ap.parse_args()
     tok=AutoTokenizer.from_pretrained(args.model)
     model=AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32).eval()
@@ -116,7 +118,7 @@ def main():
                         if mode=="freer":
                             mask=reach_freeR(delta,shift)
                         else:
-                            mask=reach_paper(delta,shift,prefix_coin(ids[0].tolist()))
+                            mask=reach_paper(delta,shift,prefix_coin(ids[0].tolist()),ngrid=args.ngrid)
                         reach_ids={int(act[j]) for j in range(len(act)) if mask[j]}
                         pick=next((c for c in cand if c in reach_ids), None)
                         if pick is not None: choose=pick; inj+=1
@@ -126,8 +128,12 @@ def main():
     for pr in PROMPTS:
         base=tok.apply_chat_template([{"role":"user","content":pr}],add_generation_prompt=True,return_tensors="pt",return_dict=True)["input_ids"]
         Lh,_=run("honest",base)
-        Lf,fi=run("freer",base)
-        Lp,pi=run("paper",base)
-        print(f"PROMPT {pr!r}\n  honest={Lh} | free-r={Lf} (inj {fi}, x{Lf/max(Lh,1):.2f}){' [cap]' if Lf>=args.cap else ''} | paper={Lp} (inj {pi}, x{Lp/max(Lh,1):.2f}){' [cap]' if Lp>=args.cap else ''}", flush=True)
+        if args.skip_freer:
+            Lp,pi=run("paper",base)
+            print(f"PROMPT {pr!r}\n  honest={Lh} | paper={Lp} (inj {pi}, x{Lp/max(Lh,1):.2f}){' [cap]' if Lp>=args.cap else ''}", flush=True)
+        else:
+            Lf,fi=run("freer",base)
+            Lp,pi=run("paper",base)
+            print(f"PROMPT {pr!r}\n  honest={Lh} | free-r={Lf} (inj {fi}, x{Lf/max(Lh,1):.2f}){' [cap]' if Lf>=args.cap else ''} | paper={Lp} (inj {pi}, x{Lp/max(Lh,1):.2f}){' [cap]' if Lp>=args.cap else ''}", flush=True)
 
 if __name__=="__main__": main()
