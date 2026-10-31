@@ -207,6 +207,8 @@ ll decode_exp_digits_table_output(
         .outputs[middle][static_cast<std::size_t>(digit)];
 }
 
+ll (*decode_exp_digits_shift_override)(ll) = nullptr;
+
 DecodeExpDigitsWitness build_decode_exp_digits_witness(
     const std::vector<ll> &deltas,
     const std::vector<int> &active,
@@ -262,6 +264,8 @@ DecodeExpDigitsWitness build_decode_exp_digits_witness(
             return result;
         }
         result.shift = honest_shift(deltas, active, config);
+        if (decode_exp_digits_shift_override)
+            result.shift = decode_exp_digits_shift_override(result.shift);
         if (result.shift < 0 || result.shift > shift_upper_bound)
         {
             result.message = "honest digit shift is outside its public bound";

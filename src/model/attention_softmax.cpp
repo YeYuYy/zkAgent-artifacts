@@ -113,6 +113,8 @@ static AttentionSoftmaxRowWitness build_attention_softmax_row_impl(
         }
         result.zeta = round_nearest_signed(
             static_cast<long double>(maximum) + std::log(sum) / alpha);
+        if (attention_softmax_zeta_override)
+            result.zeta = attention_softmax_zeta_override(result.zeta);
 
         const std::size_t n = scores.size();
         for (auto &column : result.digits)
@@ -250,6 +252,8 @@ static bool verify_attention_softmax_row_impl(
     const ll epsilon = static_cast<ll>(plan.epsilon_by_count[n - 1]);
     return total == witness.total_mass && witness.lower_residual == total - (plan.theta - epsilon) && witness.upper_residual == plan.theta + epsilon - total && witness.lower_residual >= 0 && witness.upper_residual >= 0;
 }
+
+ll (*attention_softmax_zeta_override)(ll) = nullptr;
 
 AttentionSoftmaxRowWitness build_attention_softmax_row(
     const std::vector<ll> &scores, const QuantAttentionPlan &plan)

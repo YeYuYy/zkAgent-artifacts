@@ -34,6 +34,10 @@ bool verify_attention_softmax_row(
     const std::vector<ll> &scores,
     const QuantAttentionPlan &plan);
 
+// TEST INSTRUMENT (attacks/ only): override the committed zeta on the prover side.
+// The verifier never reads it. nullptr = honest.
+extern ll (*attention_softmax_zeta_override)(ll);
+
 class PreparedAttentionSoftmax
 {
 public:
