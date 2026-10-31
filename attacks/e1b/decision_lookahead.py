@@ -23,35 +23,40 @@ def last_int(text):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
-    ap.add_argument("--prompt", default="What is 7 times 8? Reason briefly, then give the answer.")
-    ap.add_argument("--correct", default="56")
     ap.add_argument("--k", type=int, default=40)
-    ap.add_argument("--rollout", type=int, default=140)
-    ap.add_argument("--max-steps", type=int, default=120)
+    ap.add_argument("--rollout", type=int, default=130)
+    ap.add_argument("--max-steps", type=int, default=90)
     ap.add_argument("--cand", type=int, default=6, help="max wrong-digit candidates per step")
-    ap.add_argument("--ngrid", type=int, default=1200)
+    ap.add_argument("--max-rollouts", type=int, default=40, help="cap rollouts per search")
+    ap.add_argument("--ngrid", type=int, default=1500)
     ap.add_argument("--models", default="freer,paper")
     args = ap.parse_args()
+    # (prompt, correct answer) pairs -- a small proxy for a real benchmark run
+    TASKS = [
+        ("What is 7 times 8? Reason briefly, then give the answer.", "56"),
+        ("What is 9 times 6? Reason briefly, then give the answer.", "54"),
+        ("What is 13 plus 29? Reason briefly, then give the answer.", "42"),
+        ("What is 100 minus 37? Reason briefly, then give the answer.", "63"),
+        ("What is 12 times 12? Reason briefly, then give the answer.", "144"),
+    ]
     tok = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32).eval()
     terms = {tok.eos_token_id}
     te = tok.convert_tokens_to_ids("</think>")
     if isinstance(te, int) and te >= 0: terms.add(te)
-    base = tok.apply_chat_template([{"role": "user", "content": args.prompt}],
-            add_generation_prompt=True, return_tensors="pt", return_dict=True)["input_ids"]
     is_digit = lambda i: (lambda s: len(s)==1 and s.isdigit())(tok.decode([int(i)]).strip())
 
     @torch.no_grad()
-    def rollout(ids, n):
+    def rollout(ids, n, blen):
         ids = ids.clone(); k = 0
         while k < n:
             t = int(model(ids).logits[0, -1, :].argmax())
             ids = torch.cat([ids, torch.tensor([[t]])], dim=1); k += 1
             if t == tok.eos_token_id and k > 3: break
-        return tok.decode(ids[0, base.shape[1]:])
+        return tok.decode(ids[0, blen:])
 
     @torch.no_grad()
-    def honest():
+    def honest(base):
         ids = base.clone()
         for _ in range(args.rollout + args.max_steps):
             t = int(model(ids).logits[0, -1, :].argmax())
@@ -59,12 +64,11 @@ def main():
             if t == tok.eos_token_id: break
         return tok.decode(ids[0, base.shape[1]:])
 
-    htext = honest(); print(f"honest answer={last_int(htext)}\n  {htext[:300]!r}\n", flush=True)
-
     @torch.no_grad()
-    def search(mode):
-        ids = base.clone(); tried = 0
+    def search(mode, base, correct):
+        ids = base.clone(); tried = 0; blen = base.shape[1]
         for step in range(args.max_steps):
+            if tried >= args.max_rollouts: break
             lg = model(ids).logits[0, -1, :].float().numpy()
             greedy = int(lg.argmax())
             if greedy in terms: break
@@ -75,25 +79,34 @@ def main():
                 cands = [int(act[j]) for j in range(len(act))
                          if mask[j] and is_digit(int(act[j])) and int(act[j]) != greedy][:args.cand]
                 for c in cands:
+                    if tried >= args.max_rollouts: break
                     tried += 1
                     probe = torch.cat([ids, torch.tensor([[c]])], dim=1)
-                    out = rollout(probe, args.rollout)
+                    out = rollout(probe, args.rollout, blen)
                     ans = last_int(out)
-                    if ans is not None and ans != args.correct:
+                    if ans is not None and ans != correct:
                         g = tok.decode([greedy]).strip(); cc = tok.decode([c]).strip()
-                        return dict(ok=True, step=step, inj=f"{g}->{cc}", answer=ans, tried=tried, text=out[:300])
-            # commit honest greedy and advance
+                        return dict(ok=True, step=step, inj=f"{g}->{cc}", answer=ans, tried=tried, text=out[:220])
             ids = torch.cat([ids, torch.tensor([[greedy]])], dim=1)
         return dict(ok=False, tried=tried)
 
-    for mode in args.models.split(","):
-        r = search(mode)
-        if r["ok"]:
-            print(f"===== {mode}: FLIPPED (tried {r['tried']} rollouts) =====")
-            print(f"  corruption @step {r['step']}: {r['inj']}  -> wrong answer={r['answer']!r} (correct {args.correct})")
-            print(f"  {r['text']!r}\n", flush=True)
-        else:
-            print(f"===== {mode}: no single reachable corruption flipped the answer (tried {r['tried']} rollouts) =====\n", flush=True)
+    summary = {m: [0, 0] for m in args.models.split(",")}  # [flips, total]
+    for prompt, correct in TASKS:
+        base = tok.apply_chat_template([{"role": "user", "content": prompt}],
+                add_generation_prompt=True, return_tensors="pt", return_dict=True)["input_ids"]
+        hans = last_int(honest(base))
+        print(f"\n### {prompt!r}  (correct {correct}, honest answered {hans})", flush=True)
+        for mode in args.models.split(","):
+            r = search(mode, base, correct)
+            summary[mode][1] += 1
+            if r["ok"]:
+                summary[mode][0] += 1
+                print(f"  {mode:6}: FLIPPED @step{r['step']} ({r['inj']}) -> {r['answer']} [tried {r['tried']}]  {r['text'][:120]!r}", flush=True)
+            else:
+                print(f"  {mode:6}: no flip [tried {r['tried']}]", flush=True)
+    print("\n===== attack success rate =====", flush=True)
+    for m, (f, t) in summary.items():
+        print(f"  {m}: {f}/{t} answers flipped", flush=True)
 
 if __name__ == "__main__":
     main()
