@@ -150,6 +150,19 @@ R1-1.5B,cap 400–500:
 
 ---
 
+### 设计决策(放大实验时遵循)
+
+- **value probe 必须跨域训练 + 跨域评估**:单数据集内样本高度相关,同集训练+测试会高估泛化;
+  真实话题任意。做法:多领域混合训练 + **按话题/数据集 held-out** 评估,报 in-domain 与 cross-domain
+  两个数字。注意两点:(a) 威胁模型下 provider 用**真实流量**训探针,天然 in-distribution——"任意话题"
+  正是它有数据的地方;(b) 探针只优化 P2 的 yield,**攻击可行性(free-r 每步 ~30 可达)与探针无关**,
+  探针差只是 yield 低,不改变"攻击成立"。当前 `train_length_probe.py` 是单集线性探针,**待改**为多域 + 跨域。
+- **实验主力用 CoT / 推理模型**:账单膨胀的前提是"**被计费的隐藏推理客户看不见**"(hidden span `L_R`),
+  只有 CoT 且 CoT 单独计费的推理模型才成立;非 CoT 输出可见,塞 token 会被看到。核心缺陷(集值 / free-r)
+  对任何模型都成立,但 billing 半场需要 CoT。**当前脚本假设 chat/推理模型**(chat template + `</think>`),
+  base 非 CoT 模型(如 GPT-2)`apply_chat_template` 会报错。建议:主力 CoT 推理模型
+  (DeepSeek-R1 / R1-Distill、Qwen3-thinking、QwQ);可选一个 instruct 非推理模型证明决策操纵的普适性。
+
 ## 4b. 已写好的放大脚本(本机小配置验证可跑通,待上 GPU 放大)
 
 | 脚本 | 覆盖的后续实验 | 验证状态 |
