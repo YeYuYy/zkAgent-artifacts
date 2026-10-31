@@ -62,6 +62,14 @@ class Harness:
         if isinstance(te, int) and te >= 0: self.terms.add(te)
         self.is_digit = lambda i: (lambda s: len(s)==1 and s.isdigit())(self.tok.decode([int(i)]).strip())
         self.is_opener = lambda i: self.tok.decode([int(i)]).strip() in OPENERS
+        self.probe_w = np.load(a.probe)["w"] if getattr(a, "probe", "") else None  # length probe (P2)
+
+    @torch.no_grad()
+    def probe_score(self, ids, cand):
+        """1-step lookahead predicted remaining length if we emit `cand` (P2 value probe)."""
+        probe_ids = torch.cat([ids, torch.tensor([[cand]], device=self.dev)], dim=1)
+        h = self.model(probe_ids, output_hidden_states=True).hidden_states[-1][0, -1, :].float().cpu().numpy()
+        return float(self.probe_w[:-1] @ h + self.probe_w[-1])
 
     def prompt_ids(self, q):
         msg = [{"role":"user","content": q + " Reason step by step, then give the final answer."}]
@@ -93,13 +101,25 @@ class Harness:
             if choose in self.terms and n > 3: break
         return self.tok.decode(ids[0, blen:]), meta
 
-    # ---- billing: P2-lexical length steering ----
+    # ---- billing: length steering (P2-lexical openers, or P2-probe value scoring) ----
     def billing(self, q, mode, cap):
         ids = self.prompt_ids(q)
         htext, _ = self.generate(ids.clone(), cap)
         Lh = len(self.tok(htext).input_ids)
+        use_probe = self.probe_w is not None and self.a.bill_policy == "probe"
         def pol(n, lg_np, ids, greedy, meta):
             act, mask = self.reach_mask(mode, lg_np, ids)
+            if use_probe:
+                # among reachable non-terminator candidates (top-N by model prob),
+                # pick the one the probe predicts gives the LONGEST continuation.
+                order = np.argsort(-lg_np[act])
+                cands = [int(act[j]) for j in order
+                         if mask[j] and int(act[j]) not in self.terms][:self.a.probe_topn]
+                if not cands: return None
+                best = max(cands, key=lambda c: self.probe_score(ids, c))
+                if best != greedy and self.probe_score(ids, best) > self.probe_score(ids, greedy):
+                    meta["inj"] += 1; return best
+                return None
             cands = [int(act[j]) for j in range(len(act))
                      if mask[j] and self.is_opener(int(act[j])) and int(act[j]) != greedy]
             if cands: meta["inj"] += 1; return cands[0]
@@ -167,6 +187,10 @@ def main():
     ap.add_argument("--max-rollouts", type=int, default=24)
     ap.add_argument("--cand", type=int, default=6)
     ap.add_argument("--bill-cap", type=int, default=512)
+    ap.add_argument("--bill-policy", default="lexical", choices=["lexical","probe"],
+                    help="probe = P2 value probe (needs --probe); lexical = content-opener injection")
+    ap.add_argument("--probe", default="", help="path to length_probe.npz from train_length_probe.py")
+    ap.add_argument("--probe-topn", type=int, default=6, help="reachable candidates scored per step (P2)")
     ap.add_argument("--csv", default="")
     args = ap.parse_args()
     modes = args.models.split(",")
