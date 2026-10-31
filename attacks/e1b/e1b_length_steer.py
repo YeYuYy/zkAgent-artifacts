@@ -51,18 +51,28 @@ def reach_freeR(delta, shift):
     return mass_vec(delta, shift) > 0            # boolean mask over active
 
 def reach_paper(delta, shift, H, ngrid=2000):
-    # grind zeta over the band; collect which active index the fixed coin hits
+    # grind zeta over the band; collect which active index the fixed coin hits.
+    # Vectorized over the whole zeta grid (GPU runs leave this on CPU/numpy, but
+    # the heavy mass/CDF math is batched; only the per-row big-int modulo loops).
+    k = delta.shape[0]
     span = int(EPS/(ALPHA*THETA)*1.2)
-    ds = np.linspace(-span, span, ngrid).astype(np.int64)
-    hit = np.zeros(delta.shape[0], dtype=bool)
-    for dd in ds:
-        m = mass_vec(delta, shift+int(dd))
-        Th = int(m.sum())
-        if Th<=0 or Th<THETA-EPS or Th>THETA+EPS: continue
-        r = H % Th
-        c = np.cumsum(m)
-        idx = int(np.searchsorted(c, r, side="right"))
-        if idx < delta.shape[0]: hit[idx]=True
+    shifts = shift + np.linspace(-span, span, ngrid).astype(np.int64)      # (G,)
+    mag = shifts[:, None] - delta[None, :]                                 # (G,k)
+    d3 = np.right_shift(np.maximum(mag, 0), 23) & 2047
+    mass = np.where((mag >= 0) & (mag < HI), T3[d3], 0).astype(np.int64)   # (G,k)
+    Th = mass.sum(1)                                                       # (G,)
+    valid = (Th > 0) & (Th >= THETA - EPS) & (Th <= THETA + EPS)
+    hit = np.zeros(k, dtype=bool)
+    if not valid.any():
+        return hit
+    massv = mass[valid]
+    Thv = Th[valid]
+    # r = H mod Th: H can exceed int64, so reduce per (small) Th in python, then
+    # r < Th < 2^21 fits int64 for the vectorized CDF search below.
+    r = np.fromiter((H % int(t) for t in Thv), dtype=np.int64, count=len(Thv))
+    c = np.cumsum(massv, axis=1)                                           # (V,k) int64
+    idx = np.minimum((c <= r[:, None]).sum(1), k - 1)                      # active position hit
+    hit[np.unique(idx)] = True
     return hit
 
 def prefix_coin(ids):
