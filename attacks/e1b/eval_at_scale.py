@@ -56,7 +56,7 @@ class Harness:
         self.a = a
         self.dev = a.device
         self.tok = AutoTokenizer.from_pretrained(a.model)
-        self.model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.float32).to(self.dev).eval()
+        self.model = AutoModelForCausalLM.from_pretrained(a.model, dtype=getattr(torch, a.dtype)).to(self.dev).eval()
         self.terms = {self.tok.eos_token_id}
         te = self.tok.convert_tokens_to_ids("</think>")
         if isinstance(te, int) and te >= 0: self.terms.add(te)
@@ -155,6 +155,7 @@ def main():
     ap.add_argument("--split", default="test")
     ap.add_argument("--limit", type=int, default=50)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--dtype", default="float32", choices=["float32","bfloat16","float16"], help="bfloat16 for 8B on a single GPU")
     ap.add_argument("--models", default="free-r,paper")
     ap.add_argument("--task", default="both", choices=["billing","decision","both"])
     ap.add_argument("--k", type=int, default=40)

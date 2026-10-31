@@ -170,6 +170,11 @@ python3 attacks/e1b/train_length_probe.py --model <model> --device cuda --datase
 ```
 指标:`honest_acc` / `attacked_acc` / `flip_success`(decision),`median_inflation` / `mean_injrate`(billing)。
 
+**GPU 就绪**:两脚本支持 `--device cuda` 与 `--dtype {float32,bfloat16,float16}`(8B 用 `bfloat16` 单卡可放)。
+两个注意:(1) **reach 计算在 CPU(numpy)**——free-r 便宜,但 **paper 的 Θ-grind 是 python 循环,GPU 不加速,
+放大跑 paper 时是瓶颈**(需要时可向量化/搬 torch);(2) value probe 目前**只训练+评估**,接进 `eval_at_scale`
+做"每候选 1 步 lookahead 打分"的 P2 选择仍是 TODO。
+
 > 仍待**另行实现**(非 Python 单脚本):**E2 config grinding**(需带可变 batch/split-K 配置的 C++ artifact)、
 > **E3 patched zkAgent**(defense 节的函数化补丁,C++ prover/verifier)、**E5 audit economics**(复用解码 prover 计时 + 外推)。
 > 理论(necessity/sufficiency)是证明,不是脚本。

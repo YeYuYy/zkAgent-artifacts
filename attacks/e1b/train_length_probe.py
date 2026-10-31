@@ -54,10 +54,11 @@ def main():
     ap.add_argument("--limit", type=int, default=8)
     ap.add_argument("--max-new", type=int, default=200)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--dtype", default="float32", choices=["float32","bfloat16","float16"])
     ap.add_argument("--out", default="/tmp/length_probe.npz")
     args = ap.parse_args()
     tok = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32).to(args.device).eval()
+    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=getattr(torch, args.dtype)).to(args.device).eval()
     if args.dataset == "gsm8k":
         from datasets import load_dataset
         prompts = [r["question"] for r in load_dataset("openai/gsm8k","main",split=f"train[:{args.limit}]")]
