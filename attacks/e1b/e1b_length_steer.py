@@ -81,10 +81,19 @@ def main():
     terms={tok.eos_token_id}
     te=tok.convert_tokens_to_ids("</think>")
     if isinstance(te,int) and te>=0: terms.add(te)
-    marker_words=["Wait","But","Hmm","Alternatively","However","Actually","Wait,","Hold on"]
+    # P2-lexical: a broad set of CONTENT-OPENING words (reconsideration, addition,
+    # contrast, hedging). Deliberately excludes CLOSING words (So, Therefore, Thus,
+    # Hence, Finally, ...) that would shorten rather than prolong reasoning.
+    OPENERS={"Wait","But","However","Although","Though","Alternatively","Actually",
+             "Hmm","Also","Moreover","Furthermore","Additionally","Besides","Yet",
+             "Still","Instead","Meanwhile","Note","Another","Perhaps","Maybe","Unless",
+             "Except","Despite","Whereas","Nevertheless","Nonetheless","Regardless",
+             "Anyway","Plus","Interestingly","Notably","Importantly","Similarly",
+             "Conversely","Otherwise","Suppose","Consider","Recall","Remember",
+             "Looking","Because","Since","Firstly","Secondly","Alternately","Here",
+             "What","Why","Now","Let","First"}
     def is_marker(i):
-        s=tok.decode([int(i)]).strip()
-        return any(s==w or s.startswith(w) for w in marker_words)
+        return tok.decode([int(i)]).strip() in OPENERS
 
     PROMPTS=[args.prompt] if args.prompt else []
     PROMPTS=PROMPTS or ["What is 7 times 8? Give a one-line answer.",
