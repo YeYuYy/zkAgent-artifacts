@@ -150,6 +150,30 @@ R1-1.5B,cap 400–500:
 
 ---
 
+## 4b. 已写好的放大脚本(本机小配置验证可跑通,待上 GPU 放大)
+
+| 脚本 | 覆盖的后续实验 | 验证状态 |
+|---|---|---|
+| `attacks/e1b/eval_at_scale.py` | #1 上规模(GSM8K/MATH,两模型,decision+billing,**含 #4 τ-sweep=`--temperature`**,#5 `--ngrid`) | ✅ 端到端跑通(1.5B+custom+CSV);数字是 smoke 噪声 |
+| `attacks/e1b/train_length_probe.py` | #2 真·P2 value probe(隐状态→剩余长度,ridge) | 验证中 |
+
+放大运行(GPU 机):
+```bash
+# 决策操纵 + 账单膨胀,GSM8K 全 test,两模型;换 --model 为 8B+
+python3 attacks/e1b/eval_at_scale.py --model <8B-reasoning-model> --device cuda \
+    --dataset gsm8k --split test --limit 1319 --task both --models free-r,paper \
+    --max-new 1024 --rollout 512 --max-steps 400 --max-rollouts 60 --ngrid 3000 \
+    --csv gsm8k_eval.csv
+# 温度依赖:--temperature 0.6 / 0.8 / 1.0 各跑一遍
+# 价值探针(先训练,之后可接进 eval 的 P2 选择):
+python3 attacks/e1b/train_length_probe.py --model <model> --device cuda --dataset gsm8k --limit 500
+```
+指标:`honest_acc` / `attacked_acc` / `flip_success`(decision),`median_inflation` / `mean_injrate`(billing)。
+
+> 仍待**另行实现**(非 Python 单脚本):**E2 config grinding**(需带可变 batch/split-K 配置的 C++ artifact)、
+> **E3 patched zkAgent**(defense 节的函数化补丁,C++ prover/verifier)、**E5 audit economics**(复用解码 prover 计时 + 外推)。
+> 理论(necessity/sufficiency)是证明,不是脚本。
+
 ## 5. 复现
 
 构建(仓库根,见顶层 README 装依赖后):
@@ -174,5 +198,7 @@ python3 attacks/e1b/decision_lookahead.py --max-rollouts 40 # 决策翻转成功
 - `attacks/e1b/forced_extension.cpp` — forced-extension 判定(负面结论)
 - `attacks/e1b/e1b_length_steer.py` — 账单膨胀重生成(P1/P2,两模型)
 - `attacks/e1b/decision_attack.py / decision_lookahead.py` — 决策操纵(盲 / lookahead,多题成功率)
+- `attacks/e1b/eval_at_scale.py` — **放大版主评测**(任意 HF 模型 + GSM8K/MATH,两模型,decision+billing,τ-sweep)
+- `attacks/e1b/train_length_probe.py` — 真·P2 value probe(隐状态→剩余长度)
 
 > 所有 Python 实验在 1.5B 推理模型上于纯 CPU 运行;C++ oracle 与 Python 量化/可达性已逐位对齐校验。
