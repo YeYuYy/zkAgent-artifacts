@@ -94,7 +94,9 @@ R1-1.5B,cap 400–500:
   - **free-r:成功翻转** 7×8 的 56 → 42(腐蚀在"问题复述"处把操作数改掉,模型信自己的复述、
     老实算 6×7=42)。**仅 2 次 rollout 命中。**
   - **paper:翻不动**(计算步数字被币锁死,整条轨迹只有 1 个可达错误数字候选,且没翻)。
-- 5 题成功率(proxy):**运行中,待补**。
+- 5 题成功率(proxy):**⚠️ 未完成,需重跑**。单题 lookahead 的翻转(7×8 → 42)成立;
+  多题成功率那次 CPU 太慢(~0.6 forward/s)且时长不可控(翻不动的题会烧满 rollout)被中止。
+  重跑建议:`--max-rollouts 12 --rollout 80`(翻不动早停),或直接并入下方"E1b 上规模"在 GPU 上做。
 - 代码:`attacks/e1b/decision_attack.py`(盲)、`decision_lookahead.py`(lookahead + 多题成功率)。
 
 ---
