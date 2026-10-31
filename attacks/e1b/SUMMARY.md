@@ -156,7 +156,9 @@ R1-1.5B,cap 400–500:
   真实话题任意。做法:多领域混合训练 + **按话题/数据集 held-out** 评估,报 in-domain 与 cross-domain
   两个数字。注意两点:(a) 威胁模型下 provider 用**真实流量**训探针,天然 in-distribution——"任意话题"
   正是它有数据的地方;(b) 探针只优化 P2 的 yield,**攻击可行性(free-r 每步 ~30 可达)与探针无关**,
-  探针差只是 yield 低,不改变"攻击成立"。当前 `train_length_probe.py` 是单集线性探针,**待改**为多域 + 跨域。
+  探针差只是 yield 低,不改变"攻击成立"。`train_length_probe.py` 已支持 `--train-domains/--eval-domains`;
+  **smoke 实测证实了跨域退化**:训 custom(算术)→ 测 diverse(写作/解释)corr 0.85→0.49、R²→-0.04(比均值还差),
+  所以真实实验的探针**必须在部署分布上训**。`eval_at_scale.py --bill-policy probe` 已把探针接成 1 步 lookahead 选择器。
 - **实验主力用 CoT / 推理模型**:账单膨胀的前提是"**被计费的隐藏推理客户看不见**"(hidden span `L_R`),
   只有 CoT 且 CoT 单独计费的推理模型才成立;非 CoT 输出可见,塞 token 会被看到。核心缺陷(集值 / free-r)
   对任何模型都成立,但 billing 半场需要 CoT。**当前脚本假设 chat/推理模型**(chat template + `</think>`),
