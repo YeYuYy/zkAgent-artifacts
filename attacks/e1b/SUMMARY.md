@@ -99,6 +99,38 @@ R1-1.5B,cap 400–500:
   重跑建议:`--max-rollouts 12 --rollout 80`(翻不动早停),或直接并入下方"E1b 上规模"在 GPU 上做。
 - 代码:`attacks/e1b/decision_attack.py`(盲)、`decision_lookahead.py`(lookahead + 多题成功率)。
 
+### E1b-8B — 上规模(GPU, H200):Qwen3-8B GSM8K ✅ / R1-7B 进行中
+
+在 zk_agent 项目(H200 worker,精确 Q20 关系模拟 + BF16 前向,`/root/zk_agent/experiments/`)重做
+E1b 的放大版。关系枚举改为**精确**(全带内 ζ 断点,无网格;C++ oracle 逐位对齐),注入见证
+全部当场过 `Relation.check`,事后独立复audit 524,274 条全部通过。Qwen3-8B,GSM8K test
+n=150,τ=1,cap 4096,rollout 1536,max-rollouts 8:
+
+| 指标 | free-r(释出实现) | paper(论文设计) |
+|---|---|---|
+| 每步可达 token(reachable) | **31.6**(p10=5, p90=40) | 1.8 |
+| 账单攻击撞 cap(4096) | **150/150 = 100%** | 69/150 = 46% |
+| 注入率(注入 token / 生成 token) | **83.5%**(中位 3477 注入/条) | 2.3%(中位 79) |
+| 膨胀中位数 | **≥2.85×(下界,全部撞 cap)** | 1.74×(未删失对)/ 1.72×(下界) |
+| 决策翻转 | **0/433 rollouts**(136 eligible) | 0(候选更稀) |
+
+honest 准确率 90.7%(136/150 完成,12 条撞 4096 cap;推理长度中位 1439)。
+
+- **8B 上 free-r 账单膨胀依旧实质无上界**(100% 撞 cap),且注入率 83.5% 远超 1.5B 的 63%。
+- **paper 设计在 8B 上恶化**:1.5B 时膨胀 ~1.1–1.2×、几乎不撞 cap;8B 上 46% 撞 cap、
+  中位 1.74×——Qwen3 的"Wait/再想想"自我反思循环把每个注入的续写词放大成整段重推。
+- **决策操纵在 8B 上(目前)翻不动,且有机制解释**(decision_forensics,n=8):
+  - 数字位可转向率:free-r 下仅 8.5%(31/363 数字位有可达替换数字;paper 2.5%);
+    **答案区 0/9**——8B 写最终答案时完全锁死;
+  - 27 个 rollout 里 **78% 在 1536 步内没跑完**(截断,非纠正);
+  - 跑完的 6 个全部**自我纠正**(答案仍对);0 翻转。
+  - 诚实边界:截断的 rollout 是"未定"而非"失败";rollout 3072 的复核已排队。
+- 与 1.5B 对照:账单攻击随规模**变强**(熵更高、反思循环更长),答案操纵随规模**变难**
+  (模型更尖、自我纠正更强)——两个方向相反的 scaling 信号,正好支撑"接受集非空是结构性
+  的、后果落在账单/决策哪一侧取决于模型分布"的 framing。
+- R1-Distill-7B smoke(n=2):free-r 注入率 **96.5%**、单条未删失膨胀 6.3×;paper 5.8% 注入
+  也撞 cap。主运行(n=150)+ forensics 进行中,数字待更新。
+
 ---
 
 ## 3. 总结论(可直接进文章 framing)
@@ -116,6 +148,8 @@ R1-1.5B,cap 400–500:
 ### 诚实边界(全局)
 
 - 规模小:n≤5 短问答,模型仅 **GPT-2 124M / R1-Distill-Qwen-1.5B**(本机 15G + 纯 CPU,跑不动 8B)。
+  → **部分解除**:8B 规模见"E1b-8B"节(Qwen3-8B 完成,R1-7B 进行中);决策操纵结论在 8B 为负、
+  在 1.5B 为正,跨规模对照本身就是结果。
 - 温度:多数 τ=1(zkAgent 配置);真实部署 τ=0.6 更尖,yield 更低(已验证趋势)。
 - 策略仍是 **P2-lexical / 有限 lookahead**,不是最优攻击 → 所有数字是**下界**。
 - cap 压扁膨胀倍数;paper 的 ngrid 采样可能漏可达 token(偏保守)。
@@ -126,11 +160,11 @@ R1-1.5B,cap 400–500:
 ## 4. 后续需要做的实验(按优先级)
 
 ### 决定论文成败的
-1. **E1b 上规模(最重要)**:8B+ 推理模型(Llama-3-8B / Qwen3-8B / R1-Distill-7B)+ **完整数据集**
-   (GSM8K / MATH)。指标:**attack success rate**(能翻的题占比)、**attacked accuracy drop**
-   (正确率掉多少)、账单膨胀分布。free-r 与 paper 两模型对照。→ **需 GPU**;本机只能出 oracle/机制。
+1. **E1b 上规模(最重要)** → **进行中(GPU)**:Qwen3-8B × GSM8K(n=150)**已完成**(见 E1b-8B 节);
+   R1-7B × GSM8K、两模型 × MATH、probe、τ 扫描已排队。free-r 与 paper 两模型对照已跑通。
 2. **真·P2 value probe**:训练一个"剩余长度 / 答案正确性"探针(在模型自身隐状态上),替代
-   lexical / 暴力 lookahead,给出更接近最优攻击者的 yield 与翻转率。
+   lexical / 暴力 lookahead,给出更接近最优攻击者的 yield 与翻转率。→ 排队中(两模型各 80 条
+   gsm8k-train,跨域评估;probe 接入 `eval_at_scale`/evaluate 的 1 步 lookahead 已在 GPU 版实现)。
 
 ### 补全攻击面
 3. **注意力 steering 的下游 yield**:把 E1a 的注意力集值性接到完整推理,量化对输出的实际影响
@@ -222,3 +256,22 @@ python3 attacks/e1b/decision_lookahead.py --max-rollouts 40 # 决策翻转成功
 - `attacks/e1b/train_length_probe.py` — 真·P2 value probe(隐状态→剩余长度)
 
 > 所有 Python 实验在 1.5B 推理模型上于纯 CPU 运行;C++ oracle 与 Python 量化/可达性已逐位对齐校验。
+
+### E1b-8B(GPU 放大)复现
+
+8B 放大不在本仓库,在 `/root/zk_agent`(H200 worker,mas_security rjob 模式):
+
+```bash
+# 关系与攻击引擎(精确 Q20 枚举 + BF16 KV 分支);tests 含 C++ oracle 对齐
+cd /root/zk_agent && python3 -m unittest tests.test_relation
+# 主评测(Qwen3-8B,GSM8K n=150;R1-7B 同型)
+python3 infrastructure/gpu/control.py enqueue --cwd <snapshot> --timeout 21600 -- \
+  <env>/python -m experiments.evaluate --model <models/Qwen3-8B-*> --data <data>/gsm8k-test.jsonl \
+  --out <runs>/qwen3-8b/gsm8k-main --limit 150 --task both --modes free-r,paper \
+  --rollout 1536 --max-rollouts 8
+# 独立复audit(注入见证逐条过 Relation.check + 汇总对账)
+python3 -m experiments.audit_results <runs>/qwen3-8b/gsm8k-main
+```
+
+文件:`experiments/{relation,engine,evaluate,probe,diag_digits,decision_forensics,audit_results,report}.py`,
+运行产物在 worker 共享存储 `runs/`,汇总快照在 `/root/zk_agent/results/e1b/`。
