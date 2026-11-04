@@ -99,7 +99,7 @@ R1-1.5B,cap 400–500:
   重跑建议:`--max-rollouts 12 --rollout 80`(翻不动早停),或直接并入下方"E1b 上规模"在 GPU 上做。
 - 代码:`attacks/e1b/decision_attack.py`(盲)、`decision_lookahead.py`(lookahead + 多题成功率)。
 
-### E1b-8B — 上规模(GPU, H200):Qwen3-8B ✅ / R1-Distill-7B ✅(GSM8K 各 n=150)
+### E1b-8B — 上规模(GPU, H200):Qwen3-8B ✅ / R1-Distill-7B ✅(GSM8K 各 n=150;τ 扫描 / MATH / vLLM 复刻见下)
 
 在 zk_agent 项目(H200 worker,精确 Q20 关系模拟 + BF16 前向,`/root/zk_agent/experiments/`)重做
 E1b 的放大版。关系枚举改为**精确**(全带内 ζ 断点,无网格;C++ oracle 逐位对齐),注入见证
@@ -151,6 +151,61 @@ honest 准确率 90.7%(136/150 完成,12 条撞 4096 cap;推理长度中位 1439
   paper 的 ζ-grind 通道在 R1 上每步可达 4.9(远宽于 Qwen3 的 1.8),注入率是 Qwen3 的
   ~8.5 倍。**"函数化前的 paper 设计"对账单膨胀的防御在 7B/8B 两个模型上都失效**。
 
+### E1b-8B/vLLM — 放大与补全(专用 vLLM rjob,2026-11-04/05)
+
+在第二张 H200(image `vllm-openai:v0.25.0`)上用 step-loop 控制器重做放大:每步
+`max_tokens=1` + top-48 logprobs,由控制器算 Q20 关系并强制所选 token(prompt 追加,
+prefix cache 吸收重复 prefill);rollout 即共享前缀缓存的新请求。n=150 全量跑 ~60–70 min
+(HF 单流 ~11h,**~10×**)。注入见证全部过 `Relation.check` 复验(8 个运行共 ~330 万条)。
+
+诚实边界:Q20 量化作用于服务引擎的 logprobs(logits 的确定性单调变换;delta 结构在
+float32 log-softmax 舍入内保持)——vLLM 复刻与 HF 复刻数字一致(见下),跨后端稳健。
+
+**计分修正(重要)**:中期发现 `\boxed{\$56}` 类答案的 LaTeX 残留反斜杠被误判为"错",
+虚高翻转率;已修 `normalize/correct`(分数 a/b、`\,`、`\text{}`、残留反斜杠)并对全部
+已完成运行做事后重判(`rederive.py`,raw→corrected 同存)。下表均为修正后数字。
+
+**决策操纵(修正后 ASR,rollout 深度 1536、每题 ≤8)**:
+
+| 运行(vLLM, n=150) | honest | free-r ASR | paper ASR |
+|---|---|---|---|
+| R1-7B GSM8K τ=1.0 | 86.7% | **25.4%**(33/130) | **8.5%**(11/130) |
+| R1-7B GSM8K τ=0.8 | 86.7% | 16.9% | 3.8% |
+| R1-7B GSM8K τ=0.6 | 89.3% | 16.4% | 5.2% |
+| R1-7B MATH τ=1.0 | 83.3% | 12.0% | 2.4% |
+| Qwen3-8B GSM8K/MATH,τ∈{0.6,0.8,1.0} | 73–91% | **0** | **0** |
+| R1-7B GSM8K τ=1.0(HF logits 复刻) | 85.3% | 11.7% | 0 |
+
+- **答案操纵在部署温度下存活**:R1 上 τ=0.6 仍有 16.4%(free-r)/ 5.2%(paper)。
+- **paper 设计也能翻答案**(GSM8K 3.8–8.5%,MATH 2.4%):ζ-grind 通道在 R1 的
+  CoT 分布上足够宽。之前 HF 复刻的 paper-0 是 rollout 运气,不是结构免疫。
+- **逐题结果是混沌的**(HF vs vLLM 仅 4 题重叠翻转;并集 64/126≈51%)——每题
+  成败取决于轨迹,攻击面本身(可达集结构)跨后端不变:Qwen3 两后端均 0,R1 两后端均正。
+- Qwen3-8B 在 MATH、三个 τ 下均 0 翻转:其负结果是稳的(深度复核已证自我纠正)。
+
+**账单膨胀 τ 扫描(n=150,mean injection rate / cap-hit)**:
+
+| 模型 | τ | free-r 注入率 | free-r 撞 cap | paper 注入率 | paper 撞 cap |
+|---|---|---|---|---|---|
+| Qwen3-8B | 1.0 | 83.4% | **150/150** | 2.3% | 44% |
+| Qwen3-8B | 0.8 | 34.8% | **150/150** | 1.7% | 27% |
+| Qwen3-8B | 0.6 | 5.2% | **150/150** | 1.2% | 19% |
+| R1-7B | 1.0 | 93.4% | 88% | 18.9% | 81% |
+| R1-7B | 0.6 | 71.2% | 88% | 2.0% | 68% |
+
+- **free-r 的账单膨胀完全温度稳健**:注入机会从 83% 掉到 5%,撞 cap 率纹丝不动
+  (100%)——每 ~20 步漏进一个续写词即可自续循环。paper 模式随 τ 变尖而减弱但仍显著。
+
+**MATH(两模型,n=150,τ=1)**:Qwen3 honest 73.3%,free-r 150/150 撞 cap @84% 注入;
+R1 honest 83.3%,free-r 93% 撞 cap @95% 注入,paper 98% 撞 cap @25% 注入。
+账单面在 MATH(更长 CoT)上同样无界。
+
+**value probe(真·P2)为负结果**:两模型 ridge 探针(隐状态→剩余推理长度):
+train corr 0.83–0.84 / R² 0.68–0.71,但 **held-out 同域 R² ≤ 0.22(R1 为 −0.19)、
+跨域 ≈ 0**——7B/8B 的推理长度重尾,线性探针不可泛化(1.5B 时同域 R² 0.72)。
+probe 接入的 1 步 lookahead 计费攻击(hf worker,进行中)预计不优于 lexical;
+攻击可行性本就不依赖 probe(free-r 每步 ~30 可达)。
+
 ---
 
 ## 3. 总结论(可直接进文章 framing)
@@ -168,10 +223,12 @@ honest 准确率 90.7%(136/150 完成,12 条撞 4096 cap;推理长度中位 1439
 ### 诚实边界(全局)
 
 - 规模小:n≤5 短问答,模型仅 **GPT-2 124M / R1-Distill-Qwen-1.5B**(本机 15G + 纯 CPU,跑不动 8B)。
-  → **大部分解除**:GSM8K 上 Qwen3-8B(n=150)与 R1-Distill-7B(n=150)已完成(见"E1b-8B"节),
-  两个模型的注入见证全部独立复验通过;决策操纵在 R1-7B 为正(12.7% ASR)、Qwen3-8B 为负
-  (自我纠正),1.5B 为正——跨模型对照本身就是结果。MATH / τ 扫描 / probe 进行中。
+  → **解除**:Qwen3-8B 与 R1-Distill-7B,GSM8K(τ∈{0.6,0.8,1.0})+ MATH(τ=1)各 n=150,
+  两个 serving 后端(HF 单流 + vLLM),注入见证全部独立复验(合计 ~380 万条);决策操纵
+  R1-7B 为正(11.7–25.4%)、Qwen3-8B 为负(0/全部 ~700 eligible)、1.5B 为正。
 - 温度:多数 τ=1(zkAgent 配置);真实部署 τ=0.6 更尖,yield 更低(已验证趋势)。
+  → **τ∈{0.6,0.8,1.0} 已扫**(两模型):注入机会大降但 free-r 撞 cap 率不变、R1 决策
+  翻转仍 16%。
 - 策略仍是 **P2-lexical / 有限 lookahead**,不是最优攻击 → 所有数字是**下界**。
 - cap 压扁膨胀倍数;paper 的 ngrid 采样可能漏可达 token(偏保守)。
 - 注意力只做到"接受域谓词"级(E1a),**未做注意力的 yield / 下游影响**。
@@ -181,12 +238,12 @@ honest 准确率 90.7%(136/150 完成,12 条撞 4096 cap;推理长度中位 1439
 ## 4. 后续需要做的实验(按优先级)
 
 ### 决定论文成败的
-1. **E1b 上规模(最重要)** → **GSM8K 主结果已完成(GPU)**:Qwen3-8B 与 R1-Distill-7B 各 n=150
-   (见 E1b-8B 节),含 decision forensics 与深度复核;两模型 × MATH(n=75)、value probe、
-   τ∈{0.6,0.8} 扫描排队/进行中。
-2. **真·P2 value probe**:训练一个"剩余长度 / 答案正确性"探针(在模型自身隐状态上),替代
-   lexical / 暴力 lookahead,给出更接近最优攻击者的 yield 与翻转率。→ 排队中(两模型各 80 条
-   gsm8k-train,跨域评估;probe 接入 `eval_at_scale`/evaluate 的 1 步 lookahead 已在 GPU 版实现)。
+1. **E1b 上规模(最重要)** → **完成**:Qwen3-8B / R1-Distill-7B × GSM8K(τ∈{0.6,0.8,1.0})×
+   MATH(τ=1),n=150(HF 复刻 GSM8K n=150 + MATH n=75;vLLM 全量);decision forensics、
+   深度 rollout 复核、双后端交叉、审计全过。唯一进行中:probe 接入的 1 步 lookahead 计费
+   攻击(HF worker,R1 已 ~10/60,数字待补)。
+2. **真·P2 value probe** → **已完成(负结果)**:7B/8B 线性隐状态探针同域 held-out
+   R² ≤ 0.22、跨域 ≈ 0(见 E1b-8B/vLLM 节);lexical 策略仍是有效攻击者下界。
 
 ### 补全攻击面
 3. **注意力 steering 的下游 yield**:把 E1a 的注意力集值性接到完整推理,量化对输出的实际影响
@@ -297,3 +354,17 @@ python3 -m experiments.audit_results <runs>/qwen3-8b/gsm8k-main
 
 文件:`experiments/{relation,engine,evaluate,probe,diag_digits,decision_forensics,audit_results,report}.py`,
 运行产物在 worker 共享存储 `runs/`,汇总快照在 `/root/zk_agent/results/e1b/`。
+
+vLLM 后端(第二张 H200,`--root <root>/vllm` 队列,image `vllm-openai:v0.25.0`):
+
+```bash
+python3 infrastructure/gpu/control.py --root <root>/vllm/worker enqueue --cwd <snapshot> \
+  --timeout 14400 -- python3 -m experiments.vllm_runner --model <models/R1-*> \
+  --data <data>/gsm8k-test.jsonl --out <runs-vllm>/r1-7b/gsm8k-tau10 \
+  --limit 150 --task both --modes free-r,paper --rollout 1536 --max-rollouts 8 \
+  --batch 150 --max-seqs 128 --temperature 1.0
+# 计分修正后重判(答案抽取 LaTeX 修复,raw 与 corrected 并存)
+python3 -m experiments.rederive <runs-vllm>/r1-7b/gsm8k-tau10
+```
+
+汇总快照:`/root/zk_agent/results/e1b/`(HF)与 `/root/zk_agent/results/e1b-vllm/`(vLLM)。
