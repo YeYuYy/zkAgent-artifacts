@@ -206,6 +206,64 @@ train corr 0.83–0.84 / R² 0.68–0.71,但 **held-out 同域 R² ≤ 0.22(R1 �
 probe 接入的 1 步 lookahead 计费攻击(hf worker,进行中)预计不优于 lexical;
 攻击可行性本就不依赖 probe(free-r 每步 ~30 可达)。
 
+### E1b-5 — 决策操纵的修正:哈希链重投 → 轨迹级 best-of-N(2026-11-05)
+
+> 机制全貌与本次代码改动清单见 `attacks/e1b/E1b-NEXT.md`;下为结果摘要。
+
+**动机(之前低估了 paper 设计的威力)**:E1b-4 / `eval_at_scale.py` 的 lookahead 在注入一个
+可达错数字后**贪心续写**,只检验了**一条**下游轨迹。但采样币 `r = H(tr_<t) mod Θ` 是对承诺前缀
+的**哈希链**:在任一分叉点换一个可达 token,就重新确定了之后**所有**的币 ⇒ 一条全新的、服从模型
+自身分布的续写。攻击者因此可在整条轨迹上做 **best-of-N**:挑一个可达腐蚀,再探 N 条可容许的下游币链,
+留任一条"错且未被自我纠正"的。贪心版漏掉了这一放大。
+
+**修正实现**:`attacks/e1b/decision_bestofN.py` 把贪心续写换成**采样续写**(τ 下对 active top-k 的
+categorical = 诚实解码本身;重投币 = 从模型分布里重采样),并做 best-of-N。续写模式:
+`greedy`(旧的保守基线)/`sample`(claim-1 的 best-of-N 基线)/`steer`(启发式:在可达集内封掉
+自我纠正词 Wait/But/recheck/… ——set-valued 自由度允许的前提下,压制 SUMMARY 发现的"翻转被自我纠正
+吃掉"的失败模式)。另有启发式 `--target-restatement`(优先攻问题复述段里与操作数同值的数字位)。
+诚实边界:**本机 1.5B(R1-Distill-Qwen-1.5B,fp16 单卡)+ n=3 短算术 smoke**,只为证明机制与代码,
+非论文数字。答案抽取已加固(只认 `\boxed{}` 或 `</think>` 后的结论,截断的 rollout 一律不计 ⇒ 不会
+误判翻转)。
+
+| 续写方式 | free-r ASR | paper ASR | 备注 |
+|---|---|---|---|
+| **greedy(旧基线,1 条续写)** | 2/3 | ~0(与 E1b-4 一致) | 7×8 翻不动 |
+| **sample best-of-N(N=6)** | **3/3** | **1/3**(7×8 @step41,→32) | best-of-N 救回 greedy 漏掉的 7×8 |
+| **steer best-of-N(N=6)** | 3/3 | 1/3(7×8 @step68,7→0→49) | 本 smoke 集太小/太易,steer 未超过 sample |
+
+- **free-r:贪心 2/3 → best-of-N 3/3**,翻转恰好发生在贪心翻不动的那步——直接坐实说法 1 的放大。
+- **paper 设计并非对决策操纵免疫**:E1b-4 在 1.5B 上报 ~0,**采样 best-of-N 把 paper 做到 1/3**。
+  之前的"paper 决策免疫"是贪心单轨迹的假象。
+- **启发式**:`steer` 在此 3 题集与 `sample` 同为 1/3(两者都翻 7×8,另两题 paper 下自我纠正太强);
+  其边际价值需在**大/难数据集**上才显现(自我纠正是 binding 失败模式时)——是**待上 GPU harness 的 TODO**,
+  不是负结果。
+- **放大**:两脚本支持 `--device cuda`;把 `eval_at_scale.py` 的贪心 rollout 替换为本脚本的采样 best-of-N,
+  即可在 7B/8B 上重测 ASR(预期两模型 ASR 均较 E1b-8B 的贪心数字上移)。
+
+### E1b-attn — 注意力容差 → 解码 logit 的扰动幅度(2026-11-05)
+
+E1a 只证了注意力 verifier 接受上千个 ζ(谓词层),**未量化下游**。本实验把它接到真实 logits。
+机制(对齐 `setvalued_attention.cpp` 与 src):注意力输出行 `o = (Σ m_i v_i)/θ`,**除数是公开常数 θ,
+不是承诺行质量**,故均匀 ζ 平移**不抵消**——可容许的行质量 `Θ_row∈[θ±ε]` 把整行输出缩放
+`g∈[1−ε/θ, 1+ε/θ] = 1±0.676%`。"两极"即 `g=1∓ρ`,每个 (层, 头, query 行) 由 prover 独立选。
+
+**实现**:`attacks/e1b/attn_slack_logits.py` 在 GPT-2 124M(**正是释出的 zkAgent artifact 模型**)上 hook
+`eager_attention_forward`,按 g 缩放每行注意力上下文(c_proj 之前),重跑前向读末步 logits。扰动模式:
+coherent±(全同号)、random(逐行随机 ±ρ 集成)、adversarial(对 top1→top2 margin 做 autograd,逐行取
+一阶最优号——仍是可容许扰动)。
+
+- **一致同号几乎无害**:coherent± 的 margin 变化 ≈ ±0.0001(近均匀缩放在 logit 差里抵消);`dL∞≈0.18`。
+- **逐行独立选号才是威胁**:**adversarial** 把末步 top1−top2 margin 推动 `dL∞≈0.14`,**翻转贪心 token**
+  (` yes`→` no`,honest margin 0.1276 → −0.0099)。
+- **逐步扫描(prompt 16 步)**:对抗性注意力容差单独可翻 **3/16 步**,margin 位移**中位 0.13 / 最高 0.34**;
+  **能翻的最大 honest margin ≈ 0.30 ⇒ 任何 top1−top2 间隔 ≲ 0.30 logit 的解码步,单靠注意力容差就能翻**,
+  无需任何解码容差 grinding。
+- **额外解码分叉**:在 **paper** 解码模型,注意力容差把该步可达集 **22 → 37 token(+68%)**,并能翻
+  coin-0 token;free-r 本就撑满 top-k=40,union 无增量。
+- **诚实边界**:这是一阶"两极"(归一化带)模型,**未含**逐键差分取整的二阶 per-element 抖动 ⇒ 报告的
+  logit 位移是**下界**;在 **GPT-2 124M** 上测(mid-CoT 分叉步 margin 更小,7B/8B 上可翻步比例预计更高,
+  待上 GPU 重测)。
+
 ---
 
 ## 3. 总结论(可直接进文章 framing)
@@ -217,6 +275,8 @@ probe 接入的 1 步 lookahead 计费攻击(hf worker,进行中)预计不优于
    - 释出实现(采样币 r 未绑前缀,free-r):可达 ~30–37、账单**实质无上界**(63% 注入)、
      **决策可被 lookahead 翻转**(56→42)。
 3. **决策操纵需要 lookahead**(盲打会被自我纠正);账单膨胀靠拉长而非 force-skip。
+   **修正(E1b-5)**:真正的武器不是贪心 lookahead,而是**哈希链重投 → 轨迹级 best-of-N**;
+   据此 **paper 设计也能翻决策**(1.5B smoke 1/3,此前贪心报 ~0),free-r 2/3→3/3。
 4. 推荐 framing:**"即便按论文最强防御,关系仍是集值的(存在性 + 分叉点必翻);其释出实现因未绑定
    采样币,账单实质无上界、答案可被操纵。"**
 
@@ -230,8 +290,12 @@ probe 接入的 1 步 lookahead 计费攻击(hf worker,进行中)预计不优于
   → **τ∈{0.6,0.8,1.0} 已扫**(两模型):注入机会大降但 free-r 撞 cap 率不变、R1 决策
   翻转仍 16%。
 - 策略仍是 **P2-lexical / 有限 lookahead**,不是最优攻击 → 所有数字是**下界**。
+  → **部分修正(E1b-5)**:贪心 lookahead 已换成采样 best-of-N(`decision_bestofN.py`),
+  坐实哈希链重投的放大;但仍限于 1.5B smoke,**待并入 GPU harness 重测 7B/8B ASR**。
 - cap 压扁膨胀倍数;paper 的 ngrid 采样可能漏可达 token(偏保守)。
-- 注意力只做到"接受域谓词"级(E1a),**未做注意力的 yield / 下游影响**。
+- 注意力只做到"接受域谓词"级(E1a)。→ **首次量化(E1b-attn)**:注意力容差 ±0.676%/行,
+  对抗性选号单独可翻 margin ≲0.30 的解码步(GPT-2 3/16 步),paper 可达集 +68%;仍是一阶"两极"
+  模型的下界,**待在 7B/8B 上重测下游 yield**。
 
 ---
 
@@ -246,8 +310,9 @@ probe 接入的 1 步 lookahead 计费攻击(hf worker,进行中)预计不优于
    R² ≤ 0.22、跨域 ≈ 0(见 E1b-8B/vLLM 节);lexical 策略仍是有效攻击者下界。
 
 ### 补全攻击面
-3. **注意力 steering 的下游 yield**:把 E1a 的注意力集值性接到完整推理,量化对输出的实际影响
-   (目前只证了谓词接受多值)。
+3. **注意力 steering 的下游 yield** → **已起步(E1b-attn)**:GPT-2 上注意力容差 ±0.676%/行 → 对抗性
+   选号翻 margin ≲0.30 的步、paper 可达集 +68%(`attn_slack_logits.py`)。**待做**:(a) 7B/8B 上重测;
+   (b) 把一阶"两极"升级为逐键差分取整的完整可容许集;(c) 注意力扰动 + 解码重投的联合 yield。
 4. **τ 扫描**:τ∈{0.6,0.8,1.0} 下重跑 yield / 账单 / 翻转,给出温度依赖曲线。
 5. **paper 模型更密网格复核**:ngrid 2000→更大,确认 paper 的可达/翻转是否被低估。
 
@@ -321,7 +386,13 @@ g++ -std=c++14 -O2 -fopenmp -mcmodel=large -Isrc -I3rd -I3rd/mcl/include \
 # E1b 需要真实 logits / 重生成的部分是 Python(torch + transformers):
 python3 attacks/e1b/dump_logits.py --model openai-community/gpt2 --prompt "..." --out logits.txt
 python3 attacks/e1b/e1b_length_steer.py --cap 400           # 账单膨胀,两模型
-python3 attacks/e1b/decision_lookahead.py --max-rollouts 40 # 决策翻转成功率,两模型
+python3 attacks/e1b/decision_lookahead.py --max-rollouts 40 # 决策翻转成功率,两模型(旧·贪心)
+# E1b-5 决策修正(哈希链重投 → 采样 best-of-N;--device cuda 可放 8B):
+python3 attacks/e1b/decision_bestofN.py --rollout-mode greedy --models free-r,paper   # 旧基线
+python3 attacks/e1b/decision_bestofN.py --rollout-mode sample --bestof 6               # claim-1 放大
+python3 attacks/e1b/decision_bestofN.py --rollout-mode steer  --bestof 6               # + 自我纠正抑制启发式
+# E1b-attn 注意力容差 → 解码 logit 扰动(GPT-2 124M = zkAgent artifact 模型):
+python3 attacks/e1b/attn_slack_logits.py --model openai-community/gpt2
 ```
 
 文件清单:
@@ -330,11 +401,14 @@ python3 attacks/e1b/decision_lookahead.py --max-rollouts 40 # 决策翻转成功
 - `attacks/e1b/yield_decode.cpp / freer_reach.cpp / reach_both.cpp` — 可达性 / yield(两模型)
 - `attacks/e1b/forced_extension.cpp` — forced-extension 判定(负面结论)
 - `attacks/e1b/e1b_length_steer.py` — 账单膨胀重生成(P1/P2,两模型)
-- `attacks/e1b/decision_attack.py / decision_lookahead.py` — 决策操纵(盲 / lookahead,多题成功率)
+- `attacks/e1b/decision_attack.py / decision_lookahead.py` — 决策操纵(盲 / 贪心 lookahead,多题成功率)
+- `attacks/e1b/decision_bestofN.py` — **E1b-5 决策修正**:哈希链重投 → 采样 best-of-N(greedy/sample/steer 三模式 + 复述靶向启发式)
+- `attacks/e1b/attn_slack_logits.py` — **E1b-attn**:注意力容差(±ε/θ 两极)→ 解码 logit 扰动 / 可达集增量
 - `attacks/e1b/eval_at_scale.py` — **放大版主评测**(任意 HF 模型 + GSM8K/MATH,两模型,decision+billing,τ-sweep)
 - `attacks/e1b/train_length_probe.py` — 真·P2 value probe(隐状态→剩余长度)
 
-> 所有 Python 实验在 1.5B 推理模型上于纯 CPU 运行;C++ oracle 与 Python 量化/可达性已逐位对齐校验。
+> 早期 Python 实验在 1.5B 推理模型上于纯 CPU 运行;E1b-5 / E1b-attn 的 smoke 在本机单卡 GPU
+> (1.5B fp16 / GPT-2 fp32)运行。C++ oracle 与 Python 量化/可达性已逐位对齐校验。
 
 ### E1b-8B(GPU 放大)复现
 
