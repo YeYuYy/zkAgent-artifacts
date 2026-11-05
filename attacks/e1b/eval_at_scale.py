@@ -21,6 +21,7 @@ import argparse, csv, re, sys, time
 import numpy as np, torch
 sys.path.insert(0, "attacks/e1b")
 from e1b_length_steer import quant, active_and_shift, reach_freeR, reach_paper, prefix_coin
+from attn_reach import AttnSlack, union_reach
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 OPENERS = {"Wait","But","However","Although","Though","Alternatively","Actually","Hmm",
@@ -34,17 +35,22 @@ def last_int(text):
     m = re.findall(r"-?\d+", text.replace(",", ""))
     return m[-1] if m else None
 
-def load_items(dataset, limit, split):
+def load_items(dataset, limit, split, math_levels=""):
     if dataset == "gsm8k":
         from datasets import load_dataset
         ds = load_dataset("openai/gsm8k", "main", split=f"{split}[:{limit}]")
         return [(r["question"], r["answer"].split("####")[-1].strip()) for r in ds]
     if dataset == "math":
         from datasets import load_dataset
-        ds = load_dataset("hendrycks/competition_math", split=f"{split}[:{limit}]")
-        def boxed(s):
-            m = re.search(r"\\boxed\{([^}]*)\}", s); return m.group(1) if m else None
-        return [(r["problem"], boxed(r["solution"])) for r in ds]
+        # MATH-500 (ungated; hendrycks/competition_math is now gated). test-only; level is int 1-5.
+        ds = load_dataset("HuggingFaceH4/MATH-500", split=split)
+        lv = set(math_levels.split(",")) if math_levels else None
+        out = []
+        for r in ds:
+            if lv and str(r.get("level", "")) not in lv: continue
+            out.append((r["problem"], r["answer"]))
+            if len(out) >= limit: break
+        return out
     # custom tiny arithmetic set (no download) -- for plumbing validation
     base = [("What is 7 times 8?", "56"), ("What is 9 times 6?", "54"),
             ("What is 13 plus 29?", "42"), ("What is 100 minus 37?", "63"),
@@ -56,7 +62,13 @@ class Harness:
         self.a = a
         self.dev = a.device
         self.tok = AutoTokenizer.from_pretrained(a.model)
-        self.model = AutoModelForCausalLM.from_pretrained(a.model, dtype=getattr(torch, a.dtype)).to(self.dev).eval()
+        mkw = dict(dtype=getattr(torch, a.dtype))
+        if getattr(a, "attn", "off") == "on": mkw["attn_implementation"] = "eager"
+        self.model = AutoModelForCausalLM.from_pretrained(a.model, **mkw).to(self.dev).eval()
+        self.model.requires_grad_(False)
+        self.attn = AttnSlack(self.model, rho=7088/(1<<20), device=self.dev,
+                              dtype=getattr(torch, a.dtype)).bind(self.model) \
+                    if getattr(a, "attn", "off") == "on" else None
         self.terms = {self.tok.eos_token_id}
         te = self.tok.convert_tokens_to_ids("</think>")
         if isinstance(te, int) and te >= 0: self.terms.add(te)
@@ -80,12 +92,19 @@ class Harness:
     def logits(self, ids):
         return self.model(ids).logits[0, -1, :].float()
 
-    def reach_mask(self, mode, lg_np, ids):
+    def _reach_logits(self, mode, lg_np, ids):
         # the decode relation operates at temperature tau: logits are scaled by 1/tau
         qint = quant(lg_np / self.a.temperature); act, delta, shift = active_and_shift(qint, self.a.k)
         mask = reach_freeR(delta, shift) if mode == "free-r" \
                else reach_paper(delta, shift, prefix_coin(ids[0].tolist()), ngrid=self.a.ngrid)
-        return act, mask
+        return set(int(act[j]) for j in range(len(act)) if mask[j])
+
+    def reachable(self, mode, lg_np, ids):
+        """decode-reachable token ids; attn-on unions the attention-tolerance band."""
+        s = self._reach_logits(mode, lg_np, ids)
+        if self.attn is not None:
+            s |= union_reach(self.attn.perturbed_logits(ids, -1), lambda L: self._reach_logits(mode, L, ids))
+        return s
 
     @torch.no_grad()
     def generate(self, ids, cap, policy=None):
@@ -108,20 +127,19 @@ class Harness:
         Lh = len(self.tok(htext).input_ids)
         use_probe = self.probe_w is not None and self.a.bill_policy == "probe"
         def pol(n, lg_np, ids, greedy, meta):
-            act, mask = self.reach_mask(mode, lg_np, ids)
+            reach = self.reachable(mode, lg_np, ids)
             if use_probe:
                 # among reachable non-terminator candidates (top-N by model prob),
                 # pick the one the probe predicts gives the LONGEST continuation.
-                order = np.argsort(-lg_np[act])
-                cands = [int(act[j]) for j in order
-                         if mask[j] and int(act[j]) not in self.terms][:self.a.probe_topn]
+                cands = [t for t in sorted(reach, key=lambda t: -lg_np[t])
+                         if t not in self.terms][:self.a.probe_topn]
                 if not cands: return None
                 best = max(cands, key=lambda c: self.probe_score(ids, c))
                 if best != greedy and self.probe_score(ids, best) > self.probe_score(ids, greedy):
                     meta["inj"] += 1; return best
                 return None
-            cands = [int(act[j]) for j in range(len(act))
-                     if mask[j] and self.is_opener(int(act[j])) and int(act[j]) != greedy]
+            cands = sorted((t for t in reach if self.is_opener(t) and t != greedy),
+                           key=lambda t: -lg_np[t])
             if cands: meta["inj"] += 1; return cands[0]
             return None
         atext, meta = self.generate(ids.clone(), cap, pol)
@@ -151,9 +169,9 @@ class Harness:
                 lg = self.logits(cur); lg_np = lg.cpu().numpy(); greedy = int(lg.argmax())
                 if greedy in self.terms: break
                 if self.is_digit(greedy):
-                    act, mask = self.reach_mask(mode, lg_np, cur)
-                    cands = [int(act[j]) for j in range(len(act))
-                             if mask[j] and self.is_digit(int(act[j])) and int(act[j]) != greedy][:self.a.cand]
+                    reach = self.reachable(mode, lg_np, cur)
+                    cands = sorted((t for t in reach if self.is_digit(t) and t != greedy),
+                                   key=lambda t: -lg_np[t])[:self.a.cand]
                     for c in cands:
                         if tried >= self.a.max_rollouts: break
                         tried += 1
@@ -173,6 +191,9 @@ def main():
     ap.add_argument("--model", default="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
     ap.add_argument("--dataset", default="gsm8k", choices=["gsm8k","math","custom"])
     ap.add_argument("--split", default="test")
+    ap.add_argument("--math-levels", default="", help="MATH only, e.g. '4,5' for Level 4-5 (empty = all)")
+    ap.add_argument("--attn", default="off", choices=["off","on"],
+                    help="on = augment per-step reachable set with attention-tolerance (attn_reach.py)")
     ap.add_argument("--limit", type=int, default=50)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--dtype", default="float32", choices=["float32","bfloat16","float16"], help="bfloat16 for 8B on a single GPU")
@@ -195,8 +216,12 @@ def main():
     args = ap.parse_args()
     modes = args.models.split(",")
     H = Harness(args)
-    items = load_items(args.dataset, args.limit, args.split)
-    print(f"[eval] model={args.model} dataset={args.dataset} n={len(items)} modes={modes} task={args.task}", flush=True)
+    items = load_items(args.dataset, args.limit, args.split, args.math_levels)
+    print(f"[eval] model={args.model} dataset={args.dataset} n={len(items)} modes={modes} "
+          f"task={args.task} attn={args.attn}", flush=True)
+    if args.task in ("decision", "both"):
+        print("[note] eval_at_scale.decision is the LEGACY greedy lookahead; for the corrected "
+              "hash-chain sampled best-of-N decision attack use decision_bestofN.py.", flush=True)
 
     rows = []
     agg = {m: dict(correct=0, flipped=0, attackable=0, infl=[], injrate=[]) for m in modes}
