@@ -200,11 +200,22 @@ float32 log-softmax 舍入内保持)——vLLM 复刻与 HF 复刻数字一致(�
 R1 honest 83.3%,free-r 93% 撞 cap @95% 注入,paper 98% 撞 cap @25% 注入。
 账单面在 MATH(更长 CoT)上同样无界。
 
-**value probe(真·P2)为负结果**:两模型 ridge 探针(隐状态→剩余推理长度):
+**value probe(真·P2)**:两模型 ridge 探针(隐状态→剩余推理长度)泛化差:
 train corr 0.83–0.84 / R² 0.68–0.71,但 **held-out 同域 R² ≤ 0.22(R1 为 −0.19)、
 跨域 ≈ 0**——7B/8B 的推理长度重尾,线性探针不可泛化(1.5B 时同域 R² 0.72)。
-probe 接入的 1 步 lookahead 计费攻击(hf worker,进行中)预计不优于 lexical;
-攻击可行性本就不依赖 probe(free-r 每步 ~30 可达)。
+
+**但弱探针已足够放大攻击** —— probe 接入的 1 步 lookahead 计费攻击(对每个可达
+候选打分挑"最续写"的,而非只挑 opener 词;两模型 n=60,已完成):
+
+| paper 模式 | lexical 注入率 | probe 注入率 | probe 膨胀(未删失/下界) |
+|---|---|---|---|
+| R1-7B | 19.4% | **61.6%** | **3.64× / 3.10×**(lexical 1.0×/2.46×) |
+| Qwen3-8B | 2.3% | **22.7%**(10×) | 1.54× / 1.58×(lexical 1.74×/1.72×) |
+
+free-r 下 probe 以**一半的注入率**(R1 58% vs 95%;Qwen3 41% vs 84%)达到同样的
+~100% 撞 cap——每刀更准。结论:**paper 设计的 ζ-grind 通道 + 任意可学的价值函数
+(哪怕泛化很差)= 账单无上界**;lexical 攻击者依赖 opener 词碰巧可达,probe 攻击者
+把整个可达集变成注入点。攻击可行性本就不依赖 probe(free-r 每步 ~30 可达)。
 
 ---
 
@@ -238,12 +249,12 @@ probe 接入的 1 步 lookahead 计费攻击(hf worker,进行中)预计不优于
 ## 4. 后续需要做的实验(按优先级)
 
 ### 决定论文成败的
-1. **E1b 上规模(最重要)** → **完成**:Qwen3-8B / R1-Distill-7B × GSM8K(τ∈{0.6,0.8,1.0})×
+1. **E1b 上规模(最重要)** → **全部完成**:Qwen3-8B / R1-Distill-7B × GSM8K(τ∈{0.6,0.8,1.0})×
    MATH(τ=1),n=150(HF 复刻 GSM8K n=150 + MATH n=75;vLLM 全量);decision forensics、
-   深度 rollout 复核、双后端交叉、审计全过。唯一进行中:probe 接入的 1 步 lookahead 计费
-   攻击(HF worker,R1 已 ~10/60,数字待补)。
-2. **真·P2 value probe** → **已完成(负结果)**:7B/8B 线性隐状态探针同域 held-out
-   R² ≤ 0.22、跨域 ≈ 0(见 E1b-8B/vLLM 节);lexical 策略仍是有效攻击者下界。
+   深度 rollout 复核、双后端交叉、审计全过;probe 接入的 1 步 lookahead 计费攻击两模型
+   n=60 已完成(见 E1b-8B/vLLM 节末)。
+2. **真·P2 value probe** → **已完成**:探针本身泛化差(同域 held-out R² ≤ 0.22),但作为
+   攻击的价值函数已足够——把 paper 模式注入率放大 3–10×、R1 未删失膨胀 1.0×→3.64×。
 
 ### 补全攻击面
 3. **注意力 steering 的下游 yield**:把 E1a 的注意力集值性接到完整推理,量化对输出的实际影响
