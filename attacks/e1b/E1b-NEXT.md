@@ -89,8 +89,18 @@ B. GSM8K only on key cells; MATH-500 full.
 strict prompt_logprobs admissibility audit) ran at scale on GSM8K τ=1, n=150, both models,
 via the ported batched harness `experiments/vllm_bestofn.py` (`/root/zk_agent`; 9–13 min
 per model). Results in `SUMMARY.md` §E1b-5@7B/8B: R1-7B free-r 9.7%@1 → 26.6%@48
-(strict 25.8%); paper strict 0%; Qwen3-8B all zero. Remaining: D1 at τ∈{0.6,0.8},
-D2 {steer × attn} cells, MATH-500 L4–5.
+(strict 25.8%); paper strict 0%; Qwen3-8B all zero.
+
+**Status (2026-11-08)**: the full remaining grid is done — A0 attention probes (margin
+swing median 0.13–0.25 at 7B/8B, larger than GPT-2's; opener-reach gain 2–3.5% of paper
+steps), D2 {steer × attn} 2×2 (steer via vLLM `bad_words`; attn-forks via a
+subprocess-isolated HF eager AttnSlack pass), D1 at τ∈{0.6,0.8}, and MATH-500 L4–5
+(n=150). 10 evals + 2 probes in ~2h wall on two H200 workers. Headline: paper-mode
+decision immunity at 7B/8B is robust to every lever (strict ASR 0 everywhere);
+free-r caps at ~28% (R1) with self-correction binding; τ is the strongest single
+suppressor (26.6 → 6.7 @48 from τ=1 → 0.6). Remaining refinements: per-(head,row)
+faithful attention enumeration (replacing the per-layer union placeholder), full
+billing×attn runs (B) — opener widening measured only, and attn×MATH-500.
 
 ---
 
