@@ -275,6 +275,35 @@ coherent±(全同号)、random(逐行随机 ±ρ 集成)、adversarial(对 top1�
   logit 位移是**下界**;在 **GPT-2 124M** 上测(mid-CoT 分叉步 margin 更小,7B/8B 上可翻步比例预计更高,
   待上 GPU 重测)。
 
+### E1b-5@7B/8B — 修正决策攻击上规模:best-of-N 预算阶梯(2026-11-07)
+
+E1b-5 的哈希链重投机制在 **Qwen3-8B / R1-Distill-7B × GSM8K n=150(τ=1,eligible 133/124)** 上重测。
+新 harness(`/root/zk_agent` 的 `experiments/vllm_bestofn.py`):honest 轨迹与全部续写都是**纯批量生成**
+(连续批处理 + 前缀缓存,无逐步引擎往返;逐步 top-48 logprobs 重建数字分叉处的 Q20 关系),双臂并行:
+greedy 臂(n=1,旧协议复刻,沿用 `decision` 字段以兼容 rederive/audit)+ 采样臂(每 fork n 个续写,
+τ 下 top-k=40 categorical = zkAgent 诚实币分布),slot-major 展平成 **ASR-vs-预算曲线**;每个 fork token
+过 `Relation.check`,首次翻转的**下游每个 token** 用 `prompt_logprobs` 重放并要求逐 token 有 witness
+(strict 口径)。全部注入见证经 `audit_results.py` 独立复验,`rederive` 复核 0 假阳。
+**单模型全程 9.2 / 13.4 分钟**(旧 HF 单流 5.8 h、旧 vLLM 步循环 63–112 min ⇒ **~40×/ ~7× 提速**)。
+
+| 模型·模式 | greedy(旧协议) | ASR@1 | @8 | @48(best-of-N) | strict@48(全轨迹可容许) |
+|---|---|---|---|---|---|
+| R1-7B · free-r | 21.8% | 9.7% | 17.7% | **26.6%** | **25.8%**(32/33 翻转全轨迹过审) |
+| R1-7B · paper | 1.6% | 0.8% | 1.6% | 1.6%(lenient) | **0%**(2 个 lenient 翻转下游存在无 witness token) |
+| Qwen3-8B · free-r | 0% | 0% | 0% | 0% | 0% |
+| Qwen3-8B · paper | 0% | 0% | 0% | 0% | 0% |
+
+(fork 机会并非稀缺:R1 free-r 1606 个数字候选 / Qwen3 paper 70 个 slot、280 条续写全试过。)
+
+- **R1-7B free-r:best-of-N 是真放大但被自我纠正封顶**——9.7%@1 → 26.6%@48(strict 25.8%),
+  相比贪心单链 21.8% 增 ~5pp;阶梯在 @24 后趋平 ⇒ 剩余 eligible 项的翻转轨迹不存在(自我纠正 binding),
+  加预算无用。旧协议数字(贪心 12 rollouts)与阶梯 @16≈21% 相互印证。
+- **paper 模式在 7B/8B 的"决策免疫"经修正攻击后仍成立(strict 口径)**:R1 仅 2 个 lenient 翻转且
+  下游均含不可容许 token(strict 0%);Qwen3 全零。**1.5B smoke 的 paper 1/3 未迁移到 7B/8B GSM8K**——
+  大模型自我纠正 + 更高 honest margin 是瓶颈,不是搜索预算(70/280 个 paper fork 机会已试尽)。
+- **Qwen3-8B 的负结果在修正协议下复核为稳**:两模式、全部预算、strict/lenient 全 0。
+- 待做:τ∈{0.6,0.8} 阶梯、MATH-500 L4–5(D1/D2 矩阵)、attn-on 并轴。
+
 ---
 
 ## 3. 总结论(可直接进文章 framing)
@@ -288,6 +317,9 @@ coherent±(全同号)、random(逐行随机 ±ρ 集成)、adversarial(对 top1�
 3. **决策操纵需要 lookahead**(盲打会被自我纠正);账单膨胀靠拉长而非 force-skip。
    **修正(E1b-5)**:真正的武器不是贪心 lookahead,而是**哈希链重投 → 轨迹级 best-of-N**;
    据此 **paper 设计也能翻决策**(1.5B smoke 1/3,此前贪心报 ~0),free-r 2/3→3/3。
+   **上规模(E1b-5@7B/8B,2026-11-07)**:R1-7B free-r 9.7%@1 → 26.6%@48(严格口径 25.8%),
+   放大真实但被自我纠正封顶(阶梯 @24 后走平);**paper 的决策免疫在 7B/8B 经修正攻击复核成立**
+   (R1 lenient 1.6% / strict 0%,Qwen3 全 0)——1.5B 的 paper 1/3 未迁移,瓶颈是自我纠正而非预算。
 4. 推荐 framing:**"即便按论文最强防御,关系仍是集值的(存在性 + 分叉点必翻);其释出实现因未绑定
    采样币,账单实质无上界、答案可被操纵。"**
 
@@ -301,8 +333,9 @@ coherent±(全同号)、random(逐行随机 ±ρ 集成)、adversarial(对 top1�
   → **τ∈{0.6,0.8,1.0} 已扫**(两模型):注入机会大降但 free-r 撞 cap 率不变、R1 决策
   翻转仍 16%。
 - 策略仍是 **P2-lexical / 有限 lookahead**,不是最优攻击 → 所有数字是**下界**。
-  → **部分修正(E1b-5)**:贪心 lookahead 已换成采样 best-of-N(`decision_bestofN.py`),
-  坐实哈希链重投的放大;但仍限于 1.5B smoke,**待并入 GPU harness 重测 7B/8B ASR**。
+  → **修正已上规模(E1b-5@7B/8B)**:采样 best-of-N 阶梯已并入 GPU harness
+  (`experiments/vllm_bestofn.py`,纯批量生成,单模型 9–13 min);R1-7B free-r 21.8%→26.6%@48
+  (strict 25.8%),paper strict 0%,Qwen3 全 0——见 §E1b-5@7B/8B。
 - cap 压扁膨胀倍数;paper 的 ngrid 采样可能漏可达 token(偏保守)。
 - 注意力只做到"接受域谓词"级(E1a)。→ **首次量化(E1b-attn)**:注意力容差 ±0.676%/行,
   对抗性选号单独可翻 margin ≲0.30 的解码步(GPT-2 3/16 步),paper 可达集 +68%;仍是一阶"两极"
@@ -453,3 +486,22 @@ python3 -m experiments.rederive <runs-vllm>/r1-7b/gsm8k-tau10
 ```
 
 汇总快照:`/root/zk_agent/results/e1b/`(HF)与 `/root/zk_agent/results/e1b-vllm/`(vLLM)。
+
+**修正决策攻击(E1b-5@7B/8B,2026-11-07)复现** —— 批量 best-of-N runner(纯批量生成,无逐步
+引擎往返;单模型 9–13 min,对比旧 evaluate.py 5.8 h / 旧 vllm_runner 步循环 63–112 min):
+
+```bash
+# worker 共享根 $ROOT;解释器用 vllm venv( transformers==4.57.1):
+#   $ROOT/vllm-env/bin/python  (vllm 0.11.0;与 worker image python3 不同)
+python3 infrastructure/gpu/control.py --root $ROOT/worker enqueue --cwd <snapshot> \
+  --timeout 7200 -- $ROOT/vllm-env/bin/python -m experiments.vllm_bestofn \
+  --model $ROOT/models/R1-Distill-Qwen-7B-* --data $ROOT/data/gsm8k-test.jsonl \
+  --out $ROOT/runs-bestofn/r1-7b/gsm8k-main --limit 150
+# 审计 + 重判(与旧协议同一套工具,decision 字段保持兼容)
+$ROOT/vllm-env/bin/python -m experiments.audit_results $ROOT/runs-bestofn/r1-7b/gsm8k-main
+$ROOT/vllm-env/bin/python -m experiments.rederive   $ROOT/runs-bestofn/r1-7b/gsm8k-main
+```
+
+文件:`experiments/vllm_bestofn.py`(greedy 臂 + 采样 best-of-N 阶梯 + prompt_logprobs 严格审计)、
+`experiments/scoring.py`(计分抽出的无 torch 公共模块)、`tests/test_vllm_bestofn.py`(假引擎逻辑测试)。
+汇总快照:`/root/zk_agent/results/e1b-bestofn/`。

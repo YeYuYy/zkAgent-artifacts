@@ -85,6 +85,13 @@ Fixed axes: models **{R1-Distill-7B, Qwen3-8B}**; datasets **{MATH-500 L4–5 (p
 Ordering/cost: A0 → D2 (Qwen3-8B four cells are the dearest, prioritize) → D1 ladder (n=50) →
 B. GSM8K only on key cells; MATH-500 full.
 
+**Status (2026-11-07)**: the D1 budget ladder (greedy arm + sampled best-of-N to N=48,
+strict prompt_logprobs admissibility audit) ran at scale on GSM8K τ=1, n=150, both models,
+via the ported batched harness `experiments/vllm_bestofn.py` (`/root/zk_agent`; 9–13 min
+per model). Results in `SUMMARY.md` §E1b-5@7B/8B: R1-7B free-r 9.7%@1 → 26.6%@48
+(strict 25.8%); paper strict 0%; Qwen3-8B all zero. Remaining: D1 at τ∈{0.6,0.8},
+D2 {steer × attn} cells, MATH-500 L4–5.
+
 ---
 
 ## C. Code changes in this branch
