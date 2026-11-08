@@ -344,6 +344,47 @@ free-r:R1 2.7%(2 翻,均过严格审计)/ Qwen3 0;paper:两模型 0。难题上 
 attn:adversarial slot 翻转)、封顶者仍是自我纠正;③ Qwen3-8B 的零负结果对全部杠杆
 稳健(唯一例外:attn+steer 并用时的 1 项 0.9% 翻转);④ 温度是决策攻击面最强的
 单一抑制因子。
+  → **再修正(E1b-tree,下节)**:把"自由续写 + 事后审计"换成**全程约束在可达集内的
+  预算树搜索**后,paper 在 R1-7B 上被找到 **1 个全轨迹可容许翻转(0.8%)**——免疫
+  并非绝对;free-r 拿到 **10.7% 的"构造即严格"ASR 下界**。
+
+### E1b-tree — 可容许树状搜索:每个发出的 token 都在其可达集内(2026-11-08)
+
+此前所有决策攻击(free 续写各臂)在 fork 之后用引擎自由解码、再做事后可容许性审计
+——**轨迹本身不保证可容许**(这正是 paper strict 全 0 的来源)。E1b-tree(任务见
+`E1b-tree-attack.md`)把攻击改为**全程约束**:每个发出的 token(规范步与替换步 alike)
+都取自当步可达集(前缀已变则逐步重算),轨迹按构造可容许,strict ≡ lenient,逐 token
+成员性 assert 作为自检(全程零触发)。
+
+- **参考实现**:`attacks/e1b/tree_attack.py`(可复用 `tree_attack(...)`,与 argparse/模型
+  解耦)+ `decision_bestofN.py --search tree`(KV 续传步进器、canon=reach 内 logit 最高者
+  ——**这是对 coin 选择的代理**,已注释)。数字串聚成 quantity-group,标记 prompt 操作数;
+  组排序:≥2 可达 mention 优先、更靠近 `\boxed` 优先;方案 A(整组一致翻 d→d′)/
+  B(仅最晚 mention);`--budget` 总解码 token 上限 + `--max-groups/--max-forks`。
+  测试 `tests/test_tree_attack.py`:不变式、构造命中、paper 退化(单元素 reach)。
+- **GPU 放大**(`experiments/tree_attack.py`,speculative 窗口解码:批量贪心窗口 +
+  逐步行走,接受当 argmax ∈ reach,分歧处用同窗口 logits 取 canon 再续猜——无逐 token
+  引擎往返;canon 轨迹按模式各跑一条,eligibility 用 free-r 规范轨迹答对与否):
+  4 个运行(Qwen3-8B / R1-7B × GSM8K / MATH-500 L4-5,τ=1,n=150,两模式),每个
+  58–80 min,`audit_results`/`rederive` 全过。**ASR 均为预算搜索下界**(加预算只增不减)。
+
+| 运行·模式 | eligible | 命中 | ASR(严格=宽松,下界) | 备注 |
+|---|---|---|---|---|
+| R1-7B GSM8K · free-r | 131 | 14 | **10.7%** | 方案 A(整组一致)9/14;操作数组 4 |
+| R1-7B GSM8K · paper | 131 | **1** | **0.8%** | **7B 上首个全轨迹可容许 paper 翻转** |
+| R1-7B MATH L4-5 · free-r | 77 | 2 | 2.6% | 2/2 命中均在操作数组 |
+| R1-7B MATH L4-5 · paper | 77 | 0 | 0 | fork 机会稀少(tried 71) |
+| Qwen3-8B(两数据集·两模式) | 57–132 | 0 | 0 | 零负结果在构造严格口径下复核 |
+
+- **paper 免疫被打破一次**(R1 GSM8K 1/131):树搜索替换步在 paper 可达集内逐步重算,
+  找到了此前"自由续写 + 审计"漏掉的可容许路径——但量级极小(0.8%),与 paper 可达集
+  中位数 1–2 token 一致(fork 机会 tried 仅 190)。
+- **free-r 的 10.7% 是"构造即严格"的保证下界**——与自由续写 best-of-N 的 26.6%@48
+  (lenient)/25.8%(仅首翻转过审)不可直接对比:前者整条轨迹可容许、预算 3 组×2 方案,
+  后者是采样下界。degraded(计划替换在分歧前缀上不再可达而回退 canon)712/518 说明
+  组一致翻在分歧前缀上经常只能部分执行——计划 A 的 9 次命中证明其仍有真实增益。
+- 诚实边界:canon=reach 内 argmax 是 coin 选择的代理;树的预算(每组 2 方案、3000 token)
+  远未穷尽;关系失败步(超出容忍带)按 capped 处理、不计翻转。
 
 ---
 

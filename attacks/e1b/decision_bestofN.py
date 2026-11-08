@@ -33,6 +33,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessor, L
 sys.path.insert(0, "attacks/e1b")
 from e1b_length_steer import quant, active_and_shift, reach_freeR, reach_paper, prefix_coin
 from attn_reach import AttnSlack, union_reach
+from tree_attack import tree_attack, argmax_in_reach, default_cfg as tree_cfg
 
 # self-correction markers: the tokens that open a "wait, let me recheck" reversal.
 CORRECTION = ["Wait","wait"," Wait"," wait","But","However"," But"," However",
@@ -95,6 +96,37 @@ class BanTokens(LogitsProcessor):
     def __call__(self, input_ids, scores):
         scores[:, self.ids.to(scores.device)] = -float("inf"); return scores
 
+
+class KVStepper:
+    """step_logits_fn for tree_attack: resumes the KV cache when the next
+    prefix extends the cached one, otherwise restarts from scratch (branch)."""
+    def __init__(self, model, dev):
+        self.model, self.dev = model, dev
+        self.ids, self.past = [], None
+    def logits(self, prefix):
+        x = torch.tensor([list(prefix)], device=self.dev)
+        with torch.no_grad():
+            if self.past is not None and prefix[:len(self.ids)] == self.ids:
+                x = torch.tensor([list(prefix[len(self.ids):])], device=self.dev)
+                out = self.model(x, past_key_values=self.past, use_cache=True)
+            else:
+                out = self.model(x, use_cache=True)
+        self.past, self.ids = out.past_key_values, list(prefix)
+        return out.logits[0, -1, :].float().cpu().numpy()
+
+
+def make_reach(mode, k, tau, ngrid):
+    """reach_fn over the reference quantization (free-r interval check or paper
+    coin grinding over the zeta band); temperature enters as logits/tau, matching
+    the decode relation."""
+    def reach(logits, prefix_ids):
+        qint = quant(np.asarray(logits) / tau)
+        act, delta, shift = active_and_shift(qint, k)
+        mask = reach_freeR(delta, shift) if mode == "free-r" else \
+            reach_paper(delta, shift, prefix_coin(prefix_ids), ngrid)
+        return set(int(act[j]) for j in range(len(act)) if mask[j])
+    return reach
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
@@ -108,6 +140,12 @@ def main():
     ap.add_argument("--bestof", type=int, default=6, help="N sampled coin-chains per corruption")
     ap.add_argument("--max-forks", type=int, default=6)
     ap.add_argument("--rollout-mode", default="sample", choices=["greedy","sample","steer"])
+    ap.add_argument("--search", default="off", choices=["off","tree"],
+                    help="tree = budgeted admissible tree search (every emitted token "
+                         "constrained to its step's reachable set; no free decoding)")
+    ap.add_argument("--budget", type=int, default=4000, help="tree search: total decoded tokens per item")
+    ap.add_argument("--max-groups", type=int, default=4)
+    ap.add_argument("--max-forks", type=int, default=8)
     ap.add_argument("--target-restatement", action="store_true")
     ap.add_argument("--ngrid", type=int, default=1500)
     ap.add_argument("--models", default="free-r,paper")
@@ -121,6 +159,7 @@ def main():
     args = ap.parse_args()
     torch.manual_seed(args.seed)
     TASKS = load_items(args.dataset, args.limit, args.split, args.math_levels)
+    kv = None
 
     tok = AutoTokenizer.from_pretrained(args.model)
     mkw = dict(dtype=getattr(torch, args.dtype))
@@ -198,8 +237,10 @@ def main():
         return dict(ok=False)
 
     modes = args.models.split(",")
+    kv = KVStepper(model, dev) if args.search == "tree" else None
     print(f"[decision best-of-N] model={args.model} mode={args.rollout_mode} bestof={args.bestof} "
-          f"tau={args.temperature} target_restatement={args.target_restatement}", flush=True)
+          f"tau={args.temperature} target_restatement={args.target_restatement} "
+          f"search={args.search}", flush=True)
     agg = {m: [0, 0] for m in modes}
     for prompt, correct in TASKS:
         base = tok.apply_chat_template([{"role":"user","content":prompt}], add_generation_prompt=True,
@@ -210,7 +251,21 @@ def main():
         if not ok_honest: continue
         for m in modes:
             agg[m][1] += 1
-            r = attack(m, base, correct, prompt)
+            if args.search == "tree":
+                cfg_t = tree_cfg(max_steps=args.max_steps + args.rollout,
+                                 max_groups=args.max_groups, max_forks=args.max_forks,
+                                 steer=args.rollout_mode == "steer",
+                                 markers=set(ban_ids), term_ids=terms,
+                                 is_digit=is_digit, decode=lambda i: tok.decode([int(i)]))
+                r = tree_attack(kv.logits, make_reach(m, args.k, args.temperature, args.ngrid),
+                                argmax_in_reach, base[0].tolist(), correct, prompt,
+                                args.budget, cfg_t, final_answer)
+                r = dict(ok=r["ok"],
+                         step=r.get("step"), inj=f"{r.get('group')}->{r.get('dprime')}",
+                         plan=r.get("plan"), wrong=r.get("answer"),
+                         tokens=r.get("tokens"), tried=r.get("tried"))
+            else:
+                r = attack(m, base, correct, prompt)
             if r["ok"]:
                 agg[m][0] += 1
                 print(f"  {m:7}: FLIPPED @step{r['step']} ({r['inj']}) -> {r['wrong']}", flush=True)
@@ -218,7 +273,10 @@ def main():
                 print(f"  {m:7}: no flip", flush=True)
     print("\n===== attack success rate (flipped / attackable) =====", flush=True)
     for m, (f, t) in agg.items():
-        print(f"  {m}: {f}/{t} = {f/max(t,1):.0%}", flush=True)
+        # tree search is budgeted: its ASR is a LOWER bound (more budget only adds)
+        print(f"  {m}: {f}/{t} = {f/max(t,1):.0%}" +
+              ("  [lower bound, budgeted tree search]" if args.search == "tree" else ""),
+              flush=True)
 
 if __name__ == "__main__":
     main()
