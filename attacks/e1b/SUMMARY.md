@@ -386,6 +386,74 @@ attn:adversarial slot 翻转)、封顶者仍是自我纠正;③ Qwen3-8B 的零�
 - 诚实边界:canon=reach 内 argmax 是 coin 选择的代理;树的预算(每组 2 方案、3000 token)
   远未穷尽;关系失败步(超出容忍带)按 capped 处理、不计翻转。
 
+### E1b-choice — 无 gold 决策集(DailyDilemma / WebShop):paper reach × forced-answer beam(2026-11-11)
+
+此前所有决策攻击都建立在 GSM8K/MATH 上,ASR 的分母被 "honest 答对" 筛过。本节换成
+**没有唯一正确答案**的选择题:每个 honest choice 本身就是一次可攻击的决策。
+
+**数据与协议(无 gold 依赖)**
+
+- `data/dailydilemma-150.jsonl`:150 题 A/B 二选一(DailyDilemma 的 to_do / not_to_do)。
+- `data/webshop-choice-150.jsonl`:150 题 1–4 四选一,**静态代理**(商品 instruction +
+  同类别候选;不使用 WebShop 环境/reward),结论只限 "商品选择决策"。
+- `honest` = τ=1/top-k=40 采样;`control` = 换 seed 的第二条诚实轨迹(null flip);
+  `canonical` = coin 决定的 paper 可容许主干。
+  **eligible** = honest 解析 ∧ canonical 解析 ∧ canonical == honest;
+  **flip** = 正常结束(`done='stop'`)且 choice ≠ honest。
+- honest 采样本身就有 **1.21%(short)/ 2.43%(natural)** 的 token 落在 paper reach 之外
+  (29% / 89% 的题至少一个),所以独立重采样不是合法攻击 baseline,所有 ASR 与 null flip 并列。
+- 每题搜索不设 token 类型/数量启发式,每步展开整个 `witnesses(H,'paper')`;只保留
+  node-limit / max-paths 安全阀。
+
+**搜索空间**:canonical spine 的 fork 积中位 short 10^2.58、natural 10^19.5;它是量级
+估计,既非精确值也非上下界。修复后的 census(n=6,node-limit 15k)里 **2 题可完整枚举**
+(96 / 845 条完整轨迹,均 0 flip),其余 4 题超过 4,096 条路径上限——**n=150 搜满不可行**,
+ASR 均为搜索下界。
+
+**forced-answer beam**(用户方案):对每步可达 token `t`,读
+`margin = log Σ_{l≠honest} p_l − log p_honest` at `prefix + [t] + "\n\nFinal answer: \boxed{"`,
+`Δ(t) = margin(t) − margin(canonical)`;beam 按累计 Δ(或绝对 margin)保留路径。
+
+| 数据 / 输出 | B=8 累计 Δ ASR | 7 条随机可容许轨迹 | 步数/题 | audit |
+|---|---|---|---|---|
+| DD short(128) | **31.6%**(139 eligible,44 翻题) | 13.7% | 604 vs 224 | 8,121 检查 0 失败 |
+| DD natural(384) | **81.1%**(132,107) | 23.0% | 1,362 vs 779 | 89,855 / 0 |
+| WS short(128) | **35.0%**(140,49) | 12.9% | 798 | 6,116 / 0 |
+| WS natural(1024) | **85.6%**(125,107) | 27.5% | 5,304 | 317,455 / 0 |
+
+- DD short 的 beam 变体:B=16 累计 Δ 33.6%(1,081 步/题)、**B=4 绝对 margin 33.1%
+  (307 步/题,性价比最高)**、B=8 单步 Δ 25.2%、B=1 绝对 margin 12.2%(**65 步/题**)。
+- beam 的翻转题覆盖 rollout 的绝大多数并多 30–34 题(DD short 44 vs 19 交集 14;
+  WS short 49 vs 18 交集 15)。
+- **搜满 vs 搜不满**:dd-9459 上 beam 用 437 nodes 找到翻转,census 用 16,886 nodes
+  仍未枚举完;能枚举完的两题两者一致(都不翻)。固定预算下 Δ 引导的部分搜索优于
+  无引导枚举。
+
+**attention 轴**(HF eager + AttnSlack,ρ=7088/2^20,三扰动 union,只在 spine 探测,
+n=20,short,两臂同预算):DD on 35.0%(7/20) vs off 25.0%(5/20);WS on 17.6%(3/17)
+vs off 11.8%(2/17)。on 的翻转题**严格包含** off;每 100 探针步多 6.36–9.33 个可达
+token、每题中位多 5 个 fork。n=20 小样本,且 on 臂额外 logits 来自 eager 后端
+(honest reach 来自 sdpa),有少量 kernel 混淆。
+
+**实现更正(重要)**:vLLM runner 的 spawn 曾用父前缀建子路径且 depth+1,**偏离 token
+从未进入子路径**,所有 "偏离分支" 实际在重走同一 fork;旧 beam/census 数字(0.7%/0%)
+因此作废。审计(`deviation-token-match`)发现后修复为 `prefix + [t]`,并加
+`depth == len(ids)-base_len` 断言与回归测试;修复后同配置 ASR 0.7%→31.6%(DD short)、
+0%→81.1%(DD natural)。rollout 与 HF attention runner 不受影响。
+
+**诚实边界**:WebShop-choice 是静态四选一代理,不覆盖交互式搜索/点击决策;无 gold 下
+honest 决策本身有采样方差(换 batch 的浮点差会让 1–3% 的题 canonical 翻转);ASR 是
+搜索下界;注意力轴样本小且有一阶占位模型;全部结果仅 Qwen3-8B。
+
+**文件**:细节 `attacks/e1b/E1b-choice-RESULTS.md`(主结果 §4.9、bug 复盘 §4.11)、
+按方向逐条回答 `E1b-choice-ANSWER.md`、计划与执行修正 `E1b-choice-NEXT.md`、
+每题搜索规模 `E1b-choice-feasible-v2.jsonl`;代码 `choice_tree.py`(vLLM)、
+`choice_tree_hf.py`(attention)、`choice_tree_audit.py`、`choice_report.py`、
+`choice_scoring.py`、`choice_data.py`、`build_choice_data.py`、`choice_rollout_stats.py`、
+`choice_margin_auc.py`、`choice_attn_stats.py`、`choice_feasible_table.py`;
+测试 `test_choice_*.py`。运行产物在 worker 共享存储
+`/mnt/shared-storage-user/ai4good1-share/guodadi/zk_agent_gpu/runs-choice/qwen3/*-v2/`。
+
 ---
 
 ## 3. 总结论(可直接进文章 framing)
@@ -404,6 +472,12 @@ attn:adversarial slot 翻转)、封顶者仍是自我纠正;③ Qwen3-8B 的零�
    (R1 lenient 1.6% / strict 0%,Qwen3 全 0)——1.5B 的 paper 1/3 未迁移,瓶颈是自我纠正而非预算。
 4. 推荐 framing:**"即便按论文最强防御,关系仍是集值的(存在性 + 分叉点必翻);其释出实现因未绑定
    采样币,账单实质无上界、答案可被操纵。"**
+5. **"paper 决策免疫"是任务相关的**(E1b-choice,2026-11-11):GSM8K/MATH 的 paper strict 0%
+   来自 gold 唯一确定的答案;换到无 gold 的选择任务(DailyDilemma/WebShop-choice),
+   honest 决策本身稳定性低(null flip 5–17%)、可达分叉多,按 forced-answer Δ 保留
+   paper 可容许轨迹即可翻转 **31.6% / 81.1% / 35.0% / 85.6%** 的 eligible 决策
+   (7 条随机可容许轨迹只有 13.7–27.5%)。framing 应写 "paper 的决策免疫在数学/问答类
+   有 gold 任务上成立,在偏好/选择类无 gold 决策上不成立"。
 
 ### 诚实边界(全局)
 
@@ -441,6 +515,10 @@ attn:adversarial slot 翻转)、封顶者仍是自我纠正;③ Qwen3-8B 的零�
    (b) 把一阶"两极"升级为逐键差分取整的完整可容许集;(c) 注意力扰动 + 解码重投的联合 yield。
 4. **τ 扫描**:τ∈{0.6,0.8,1.0} 下重跑 yield / 账单 / 翻转,给出温度依赖曲线。
 5. **paper 模型更密网格复核**:ngrid 2000→更大,确认 paper 的可达/翻转是否被低估。
+
+> **E1b-choice 的后续(2026-11-11)**: (a) **RewardBench 未跑**——它带 gold,与"无标准答案
+> 数据集"的前提冲突,建议只作为 forced-answer 打分的辅助校验;(b) R1-Distill-7B 复刻
+> v2 beam(当前结果仅 Qwen3-8B);(c) 接交互式 WebShop harness(当前是静态四选一代理)。
 
 ### proposal 里的其它实验
 6. **E2 config grinding**:k 个 batch-size / split-K 配置在 EOT/EOS 步产生多少不同决策。
@@ -587,3 +665,26 @@ $ROOT/vllm-env/bin/python -m experiments.rederive   $ROOT/runs-bestofn/r1-7b/gsm
 文件:`experiments/vllm_bestofn.py`(greedy 臂 + 采样 best-of-N 阶梯 + prompt_logprobs 严格审计)、
 `experiments/scoring.py`(计分抽出的无 torch 公共模块)、`tests/test_vllm_bestofn.py`(假引擎逻辑测试)。
 汇总快照:`/root/zk_agent/results/e1b-bestofn/`。
+
+**E1b-choice(2026-11-11)复现** —— 无 gold 选择任务,paper reach × forced-answer beam:
+
+```bash
+R=/mnt/shared-storage-user/ai4good1-share/guodadi/zk_agent_gpu   # worker 共享根
+# 主跑:DD short / DD natural / WS short / WS natural,B=8 累计 Δ
+$R/vllm-env/bin/python -m experiments.choice_tree \
+  --model $R/models/Qwen3-8B-b968826d9c46dd6066d109eabc6255188de91218 \
+  --data $R/data/dailydilemma-150.jsonl \
+  --out $R/runs-choice/qwen3/dd-short-beam8-cum-v2 \
+  --thinking off --short --search beam --beam 8 --beam-score cum \
+  --max-new 128 --node-limit 40000 --batch 8 --record-forced --record-final
+# 每条 deviation 的 witness 独立复核(模型无关)
+python3 -m experiments.choice_tree_audit $R/runs-choice/qwen3/dd-short-beam8-cum-v2
+# 汇总 / 预算曲线 / 每题搜索规模
+python3 -m experiments.choice_report        $R/runs-choice/qwen3/*-v2
+python3 -m experiments.choice_feasible_table $R/runs-choice/qwen3/dd-short-beam8-cum-v2 \
+  --out feasible.jsonl
+```
+
+文件:`experiments/{choice_tree,choice_tree_hf,choice_tree_audit,choice_report,choice_scoring,choice_data,build_choice_data,choice_rollout_stats,choice_margin_auc,choice_attn_stats,choice_feasible_table}.py`,
+`tests/test_choice_*.py`;地址副本在本目录。运行产物在
+`$R/runs-choice/qwen3/*-v2/`(含 items/、summary.json、config.json)。
