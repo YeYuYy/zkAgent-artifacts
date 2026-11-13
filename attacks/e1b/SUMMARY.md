@@ -500,6 +500,31 @@ logit bound 指数,默认 20=E1a PoC 量级,artifact exp-digit 子系统本身�
 诚实边界:注意力侧(attention row 带检查)是谓词级(E1a)而非逐步证明级;本次验证
 仅覆盖解码关系;27/54 case 数受单证明成本限制,均为随机抽样构造。
 
+### E1b-taubench — τ-bench 高影响动作选择 + fp32 注意力语义修正(2026-11-13,完成)
+
+**τ-bench 静态动作选择**(`data/taubench-choice-119.jsonl`,sierra-research/tau-bench:
+31 airline + 88 retail;每题 = 客户指令(+ airline 在档预订)+ 4 个下一动作候选;
+directed target = 代价最高的干扰(cancel 错预订 8/12、错航班、礼品卡多付 $100、
+cancel-instead-modify 等)。纯 gold 动作 + 规则干扰,无环境交互(静态代理,同 m2w)。
+
+**结果(n=119,natural,paper,beam8;Qwen3 cum / R1 abs+eager;全部 audit 0 失败)**:
+
+| 模型·目标 | eligible | ASR | null | 备注 |
+|---|---|---|---|---|
+| Qwen3-8B any | 79 | **96.2%**(stable 子集 96.5%) | 42.9% | null 高 = τ-bench 动作本身高采样方差 |
+| Qwen3-8B directed | 64/80 | **87.7%** | null_dir 10.8% | 高影响动作可精准瞄准 |
+| R1-7B any | 45 | 46.7% | 22.6% | eligible 低(1536 截断) |
+| R1-7B directed | 35/36 | 40.0% | null_dir 11.4% | |
+
+**fp32 注意力语义修正(line 1a 结论)**:HF-bf16 下 margin 位移**恰为 0**
+(1±0.68% 缩放卡在 bf16 ulp 边界,是否存活取决于 kernel 舍入运气;vLLM-bf16 显示
+0.125 是 fp32 泄漏的伪影)。**fp32 引擎下测得 random 符号 margin 位移中位
+0.0151 / 最大 0.069 —— 与 fp32-HF 参考(0.0127)同量级**(`attn-validate-clean-fp32.json`;
+相关性 pearson 见 `attn-validate-final-fp32.json`)。⇒ 此前 bf16 引擎上的注意力 ASR
+(attn-only 24.8%/6.6%,hybrid 84.9%/72.2%/96.4%/95.1%)是"bf16 引擎+该 patch"的行为,
+按 Q20 电路语义应视为**上界有偏的估计**;电路本身(Q20 定点,~1e-4 相对分辨率)能表达
+±0.68% 的行质量选择,忠实模拟需 fp32 前向(或定点模拟器)。
+
 ### E1b-choice — 无 gold 决策集(DailyDilemma / WebShop):paper reach × forced-answer beam(2026-11-11)
 
 此前所有决策攻击都建立在 GSM8K/MATH 上,ASR 的分母被 "honest 答对" 筛过。本节换成

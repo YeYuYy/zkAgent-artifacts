@@ -51,6 +51,16 @@ def main():
                     help='disable torch.compile + CUDA graphs (isolates '
                          'compile-time constant specialisation of the sign '
                          'buffer)')
+    ap.add_argument('--hf-dtype', choices=['float32', 'bfloat16'], default='float32',
+                    help='HF reference dtype: bfloat16 matches vLLM — if the '
+                         'margin-shift correlation recovers, the earlier fp32 '
+                         'mismatch is precision, not semantics')
+    ap.add_argument('--dtype', choices=['bfloat16', 'float32'], default='bfloat16',
+                    help='vLLM engine dtype: the +-0.68% attention-row lever is '
+                         'at/below bf16 resolution (measured: HF-bf16 shifts are '
+                         'exactly 0 — the scale quantizes to one ulp boundary); '
+                         'float32 resolves it and is the faithful simulation of '
+                         'the Q20 circuit semantics')
     ap.add_argument('--phase', choices=['cached', 'clean', 'hf'], default='all',
                     help='vLLM engines do not release GPU memory in-process; '
                          'run each phase as its own process/job. "hf" merges '
@@ -74,7 +84,7 @@ def main():
     SP = SamplingParams
 
     def boot(cache):
-        return LLM(model=a.model, dtype='bfloat16', gpu_memory_utilization=a.gpu_mem,
+        return LLM(model=a.model, dtype=a.dtype, gpu_memory_utilization=a.gpu_mem,
                    max_model_len=4096, enable_prefix_caching=cache, max_logprobs=64,
                    disable_log_stats=True, enforce_eager=a.enforce_eager)
 
@@ -184,7 +194,7 @@ def main():
         n_layers = int(clean['n_layers'])
         n_heads = int(clean['n_heads'])
     from transformers import AutoModelForCausalLM as HF
-    hf = HF.from_pretrained(a.model, dtype=torch.float32,
+    hf = HF.from_pretrained(a.model, dtype=getattr(torch, a.hf_dtype),
                             attn_implementation='eager', local_files_only=True
                             ).cuda().eval()
     SCALE = {}
