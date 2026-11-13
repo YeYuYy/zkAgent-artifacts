@@ -53,6 +53,37 @@ def _layer_index(mod):
     return li
 
 
+def _mk_forward_next(orig, num_heads_attr='num_heads'):
+    """Qwen3NextAttention (Qwen3.5 full-attention layers): identical insertion
+    point — scale the attention output rows between self.attn() and the
+    output gate.  Linear-attention (GDN) layers have no softmax row
+    normalization and are deliberately untouched."""
+    def forward(self, positions, hidden_states):
+        import torch
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v, gate = self._project_qkv_gate(qkv, positions)
+        attn_output = self.attn(q, k, v)
+        signs = getattr(self, '_slack_signs', None)
+        if signs is None:
+            signs = _SIGNED.get('buffer')
+        li = getattr(self, '_slack_layer_idx', None)
+        if li is None:
+            li = _layer_index(self)
+        if signs is not None and 0 <= li < signs.shape[0]:
+            h = getattr(self, num_heads_attr)
+            if h <= signs.shape[1]:
+                scale = 1.0 + _SIGNED['rho'] * signs[li, :h].to(
+                    dtype=attn_output.dtype, device=attn_output.device)
+                ao = attn_output.view(attn_output.shape[0], h, self.head_dim)
+                ao = ao * scale.view(1, h, 1)
+                attn_output = ao.view(attn_output.shape[0], h * self.head_dim)
+        if gate is not None:
+            attn_output = attn_output * torch.sigmoid(gate)
+        output, _ = self.o_proj(attn_output)
+        return output
+    return forward
+
+
 def _mk_layer_init(orig):
     """Wrap Qwen2/3DecoderLayer.__init__: resolve the layer index from its
     prefix and pin the shared sign buffer on the attention submodule AT
@@ -146,12 +177,28 @@ def install(rho=RHO, num_layers=64, num_heads=64, device='cuda'):
             continue
         _SIGNED.setdefault('orig', {})[cls] = cls_obj.forward
         cls_obj.forward = _mk_forward(cls_obj.forward)
+    try:
+        from vllm.model_executor.models import qwen3_next
+    except ImportError:
+        qwen3_next = None
+    nxt = getattr(qwen3_next, 'Qwen3NextAttention', None) if qwen3_next else None
+    if nxt is not None:
+        _SIGNED.setdefault('orig', {})[nxt] = nxt.forward
+        nxt.forward = _mk_forward_next(nxt.forward)
     for mod, cls in ((qwen2, 'Qwen2DecoderLayer'), (qwen3, 'Qwen3DecoderLayer')):
         cls_obj = getattr(mod, cls, None)
         if cls_obj is None:
             continue
         _SIGNED.setdefault('orig_init', {})[cls] = cls_obj.__init__
         cls_obj.__init__ = _mk_layer_init(cls_obj.__init__)
+    try:
+        from vllm.model_executor.models import qwen3_5
+    except ImportError:  # vllm < Qwen3.5 support
+        qwen3_5 = None
+    q35 = getattr(qwen3_5, 'Qwen3_5DecoderLayer', None) if qwen3_5 else None
+    if q35 is not None:
+        _SIGNED.setdefault('orig_init', {})[q35] = q35.__init__
+        q35.__init__ = _mk_layer_init(q35.__init__)
     return _SIGNED['buffer']
 
 

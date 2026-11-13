@@ -519,11 +519,12 @@ cancel-instead-modify 等)。纯 gold 动作 + 规则干扰,无环境交互(静�
 **fp32 注意力语义修正(line 1a 结论)**:HF-bf16 下 margin 位移**恰为 0**
 (1±0.68% 缩放卡在 bf16 ulp 边界,是否存活取决于 kernel 舍入运气;vLLM-bf16 显示
 0.125 是 fp32 泄漏的伪影)。**fp32 引擎下测得 random 符号 margin 位移中位
-0.0151 / 最大 0.069 —— 与 fp32-HF 参考(0.0127)同量级**(`attn-validate-clean-fp32.json`;
-相关性 pearson 见 `attn-validate-final-fp32.json`)。⇒ 此前 bf16 引擎上的注意力 ASR
-(attn-only 24.8%/6.6%,hybrid 84.9%/72.2%/96.4%/95.1%)是"bf16 引擎+该 patch"的行为,
-按 Q20 电路语义应视为**上界有偏的估计**;电路本身(Q20 定点,~1e-4 相对分辨率)能表达
-±0.68% 的行质量选择,忠实模拟需 fp32 前向(或定点模拟器)。
+0.0151 / 最大 0.069 —— 与 fp32-HF 参考(0.0127)同量级;逐对相关 pearson 0.358
+(n=24,位移幅度 ~0.01、跨 kernel 栈,噪声受限的正向信号)**
+(`attn-validate-clean-fp32.json` / `attn-validate-final-fp32.json`)。⇒ 此前 bf16 引擎上的
+注意力 ASR(attn-only 24.8%/6.6%,hybrid 84.9%/72.2%/96.4%/95.1%)是"bf16 引擎+该
+patch"的行为,按 Q20 电路语义应视为**上界有偏的估计**;电路本身(Q20 定点,~1e-4 相对
+分辨率)能表达 ±0.68% 的行质量选择,忠实模拟需 fp32 前向(或定点模拟器)。
 
 ### E1b-choice — 无 gold 决策集(DailyDilemma / WebShop):paper reach × forced-answer beam(2026-11-11)
 
