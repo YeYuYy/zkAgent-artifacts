@@ -464,6 +464,42 @@ n=150,τ=1;Qwen3 主臂 cum、R1 主臂 abs;null_dir 均按各自 run)**:
 HF 相关性未建立(见上);cum/abs 在两模型间不一致(Qwen3 翻得早未暴露 churn,主臂沿用
 cum;R1 必须 abs)。
 
+### E1b-simval — Python 关系模拟 vs 真实 zkAgent prover+verifier(2026-11-13,完成)
+
+E1b 全部攻击只在 Python 里模拟 Q20 解码关系(`experiments/relation.py`),从未跑真 ZK
+协议。本实验在 artifact 支持的模型(GPT-2 所需的一切:关系只依赖 logits)上闭环验证
+模拟忠实性:**对每个 (token, committed ζ, r) 元组,用真 prover(`proveTopKBatch`,ζ 经
+`decode_exp_digits_shift_override` 注入)+ 真 verifier(`verifyZkDecodeProof`)端到端
+出证明并校验,与 Python 预测的接受集逐条对比。**
+
+工具:`attacks/validate_simulation.cpp`(stdin 协议:q 向量 + case 列表;argv[2] 为
+logit bound 指数,默认 20=E1a PoC 量级,artifact exp-digit 子系统本身支持 |q|≤2^46)+
+`tests/validate_simulation.py`(case 生成:paper 币 / free-r 区间(含边界)/ 负例
+(零质量 token、区间外 r、真带外 ζ)与结果比对)。
+
+**结果(全部 0 失配)**:
+
+| 设定 | cases | 结果 |
+|---|---|---|
+| 随机 logits(±2^17,E1a 量级,bound 2^20) | 54 | **54/54 一致** |
+| GPT-2 124M 真实 logits(缩放到 E1a 量级) | 54 | **54/54 一致** |
+| GPT-2 真实 logits,**不缩放**(±1.9e11,全词表 50257,bound 2^46) | 27 | **27/27 一致** |
+| 深尾域(mag=ζ−δ ≥ 2^34;witness 级逐位) | 40 token | 真实 witness builder 与 Python **同样清零**(多段数字分解的高段贡献 0,无回绕);totals 相等 |
+
+- 负例全部按预期被拒(零质量 token / 区间外 r / 带外 ζ ⇒ PROVER_FAIL 或 REJECT);
+  paper 模式(H mod Θ 路由)与 free-r 模式(区间内任取 r)均验证。
+- **方法学收获**:`states()` 折叠常值区(相邻断点之间 total 不变)——断点 ±1 仍可能
+  在带内(首版负例因此误判;修正为跨数个表宽 2^25 步)。中间整数的 witness 与断点
+  等价(mass 向量相同,仅 shift 值不同)。
+- **量级发现**:E1a PoC 的 `p.bound=2^20` 只是 PoC 自身的量级选择;artifact 的
+  `max_abs_logit=2^46` 支持真实模型规模的 q —— bound 提到 2^46 后,真实 GPT-2 全词表
+  逐步证明可行(单证明 ~秒级,vocab 50257)。
+- 结论:**E1b 各 campaign 的"模拟可达集"就是真实 verifier 的接受集**(在该关系覆盖的
+  量级内),模拟无保守/无冒进;free-r 的可达集未被低估(尾部一致清零)。
+
+诚实边界:注意力侧(attention row 带检查)是谓词级(E1a)而非逐步证明级;本次验证
+仅覆盖解码关系;27/54 case 数受单证明成本限制,均为随机抽样构造。
+
 ### E1b-choice — 无 gold 决策集(DailyDilemma / WebShop):paper reach × forced-answer beam(2026-11-11)
 
 此前所有决策攻击都建立在 GSM8K/MATH 上,ASR 的分母被 "honest 答对" 筛过。本节换成
