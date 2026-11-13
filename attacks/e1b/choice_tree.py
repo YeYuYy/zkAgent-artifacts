@@ -108,7 +108,8 @@ class ChoiceEngine(VEngine):
         return [lp_dict(o.outputs[0].logprobs[0])
                 if o.outputs[0].logprobs else None for o in outs]
 
-    def forced_scores(self, prompts, labels, honest_labels, label_ids):
+    def forced_scores(self, prompts, labels, honest_labels, label_ids,
+                      directed_labels=None):
         """Label probabilities after the forced-answer cue.
 
         The cue is out of distribution, so the label tokens are frequently not
@@ -117,10 +118,16 @@ class ChoiceEngine(VEngine):
         them by restricting sampling to the label variants with
         allowed_token_ids: masking is a constant offset, so the margin between
         labels is unaffected, and every variant is guaranteed to be returned.
+
+        margin  = log P(any label != honest) - log P(honest)   (any-flip arm)
+        dmargin = log P(directed target) - log P(any other)    (directed arm)
         """
         allowed = sorted({t for lab in labels for t in label_ids[lab]})
+        if directed_labels is None:
+            directed_labels = [None] * len(prompts)
         out = []
-        for lp, hl in zip(self.label_lps(prompts, allowed), honest_labels):
+        for lp, hl, dl in zip(self.label_lps(prompts, allowed), honest_labels,
+                              directed_labels):
             if lp is None:
                 out.append(None)
                 continue
@@ -131,8 +138,13 @@ class ChoiceEngine(VEngine):
             probs = {k: (v / z if z else 0.0) for k, v in masses.items()}
             p_h = max(probs.get(hl, 1e-9), 1e-9)
             p_other = sum(v for k, v in probs.items() if k != hl)
-            out.append(dict(probs=probs,
-                            margin=math.log(max(p_other, 1e-9)) - math.log(p_h)))
+            row = dict(probs=probs,
+                       margin=math.log(max(p_other, 1e-9)) - math.log(p_h))
+            if dl is not None and dl in probs:
+                p_d = max(probs.get(dl, 1e-9), 1e-9)
+                p_rest = sum(v for k, v in probs.items() if k != dl)
+                row['dmargin'] = math.log(p_d) - math.log(max(p_rest, 1e-9))
+            out.append(row)
         return out
 
 
@@ -167,13 +179,21 @@ def new_path(item_idx, ids, base_len, depth=0, spine=False):
     return dict(item=item_idx, ids=list(ids), base_len=base_len, depth=depth,
                 done=None, choice=None, text=None, nodes=0, fork_steps=[],
                 cand_scores=[], root_score=None, root_step=None, spine=spine,
-                beam_score=0.0, margins=[], ndev=0, dev_steps=[], wchk=0, wfail=0)
+                beam_score=0.0, margins=[], ndev=0, dev_steps=[], wchk=0, wfail=0,
+                age=0)
 
 
-def item_result(paths, honest_choice, limits, search, spine, beam_width=0):
+def item_result(paths, honest_choice, limits, search, spine, beam_width=0,
+                directed_target=None):
     terminal = [p for p in paths if p['done'] == 'stop']
     flips = [p for p in terminal if p['choice'] is not None and honest_choice is not None
              and p['choice'] != honest_choice]
+    # Directed arm: a hit is a completed trajectory that lands exactly on the
+    # designated target label (the most confusable distractor).
+    directed_hits = [p for p in terminal
+                     if directed_target is not None and p['choice'] == directed_target]
+    directed_eligible = (directed_target is not None and honest_choice is not None
+                         and directed_target != honest_choice)
     nodes = sum(p['nodes'] for p in paths)
     complete = (search == 'exhaustive' and not limits['truncated']
                 and not limits['node_limited'] and all(p['done'] == 'stop' for p in paths))
@@ -214,6 +234,10 @@ def item_result(paths, honest_choice, limits, search, spine, beam_width=0):
                max_depth=max((p['depth'] for p in paths), default=0),
                first_flip_depth=(min(p['depth'] for p in flips) if flips else None),
                canonical_choice=spine['choice'], search=search,
+               directed_target=directed_target,
+               directed_eligible=directed_eligible,
+               directed_success=bool(directed_hits) and directed_eligible,
+               directed_hits=len(directed_hits),
                paths_total=len(paths), spine_forks=len(spine['fork_steps']),
                spine_steps=spine['depth'],
                paths_capped=sum(p['done'] == 'cap' for p in paths),
@@ -231,11 +255,13 @@ def item_result(paths, honest_choice, limits, search, spine, beam_width=0):
         out['beam'] = dict(width=beam_width, tokens=nodes, scores=scores)
     elif search == 'rollout':
         # Per-trajectory record for the search-budget curve: rollout index
-        # (-1 = canonical spine), flip label, depth, and how many steps took a
-        # non-canonical in-band token.
+        # (-1 = canonical spine), any-flip label, directed-hit label, depth,
+        # and how many steps took a non-canonical in-band token.
         out['rollout_meta'] = [[p.get('rollout', -1),
                                 (p['choice'] != honest_choice)
                                 if (p['choice'] and honest_choice) else None,
+                                (p['choice'] == directed_target)
+                                if (p['choice'] and directed_target) else None,
                                 p['depth'], p.get('ndev', 0)] for p in terminal]
     elif scores:
         out['forced'] = dict(scores=scores)
@@ -250,6 +276,13 @@ def main():
     p.add_argument('--limit', type=int, default=0)
     p.add_argument('--offset', type=int, default=0)
     p.add_argument('--temperature', type=float, default=1.)
+    p.add_argument('--mode', choices=['paper', 'free-r'], default='paper',
+                   help='decode relation: paper (r=H mod Theta, zeta grind) or '
+                        'free-r (released interval-check-only coin)')
+    p.add_argument('--objective', choices=['any', 'directed'], default='any',
+                   help='any: flip to any non-honest label; directed: steer the '
+                        'decision onto meta.directed_target (most confusable '
+                        'distractor, designated in the dataset)')
     p.add_argument('--seed', type=int, default=20261111)
     p.add_argument('--thinking', choices=['on', 'off'], default='off')
     p.add_argument('--search', choices=['exhaustive', 'beam', 'rollout'],
@@ -284,6 +317,10 @@ def main():
                    help='walk the plain sample and count tokens outside witnesses(H)')
     p.add_argument('--batch', type=int, default=64)
     p.add_argument('--max-seqs', type=int, default=512)
+    p.add_argument('--enforce-eager', action='store_true',
+                   help='disable CUDA graphs/compile (R1 + long WebShop-natural '
+                        'prompts hit a flash-attention illegal-memory-access '
+                        'in vllm 0.25; eager avoids it)')
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     config = {k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()}
@@ -350,7 +387,7 @@ def main():
                     s['nocoin'] += 1; continue
                 try:
                     r = relation_from_logprobs(lp, engine.V, a.temperature)
-                    reach = r.witnesses(coin(p, a.seed), 'paper')
+                    reach = r.witnesses(coin(p, a.seed), a.mode)
                 except ValueError:
                     s['nocoin'] += 1; continue
                 s['steps'] += 1
@@ -393,7 +430,7 @@ def main():
                 H = coin(p['ids'], a.seed)
                 try:
                     r = relation_from_logprobs(lp, engine.V, a.temperature)
-                    reach = r.witnesses(H, 'paper')
+                    reach = r.witnesses(H, a.mode)
                 except ValueError:
                     p['done'] = 'relation'; continue
                 if not reach:
@@ -424,7 +461,7 @@ def main():
                     # Self-audit: the emitted token must carry its own coin
                     # witness in the same relation that produced the reach set.
                     p['wchk'] += 1
-                    if not r.check(tok, reach[tok], H, 'paper'):
+                    if not r.check(tok, reach[tok], H, a.mode):
                         p['wfail'] += 1
                     p['ids'].append(tok); p['nodes'] += 1; p['depth'] += 1
                     if tok in engine.eos:
@@ -478,20 +515,36 @@ def main():
                     # construction (the first beam run had all-zero scores).
                     prompts = candidate_prompts(cand, idx, engine.cue_ids)
                     hs = [base[chunk[cand[i][0]['item']]['id']]['honest']['choice'] for i in idx]
-                    for i, sc in zip(idx, engine.forced_scores(prompts, labels, hs, label_ids)):
+                    dls = [chunk[cand[i][0]['item']].get('meta', {}).get('directed_target')
+                           for i in idx]
+                    for i, sc in zip(idx, engine.forced_scores(prompts, labels, hs,
+                                                               label_ids, dls)):
                         scores[i] = sc
             else:
                 scores = [None] * len(cand)
             scored = [(p, t, ids, is_c, sc) for (p, t, ids, is_c), sc in zip(cand, scores)]
-            base_margin = {id(p): sc['margin'] for p, _, _, is_c, sc in scored
-                           if is_c and sc is not None}
+            # Objective margin: 'margin' drives any-flip search, 'dmargin' the
+            # directed arm (falls back to margin when the item has no directed
+            # target, e.g. DailyDilemma).
+            okey = 'dmargin' if a.objective == 'directed' else 'margin'
+
+            def omargin(sc):
+                if sc is None:
+                    return None
+                m = sc.get(okey)
+                return sc['margin'] if m is None else m
+
+            base_margin = {id(p): omargin(sc) for p, _, _, is_c, sc in scored
+                           if is_c and omargin(sc) is not None}
             deltas = {}
             for p, t, ids, is_c, sc in scored:
-                d = None if sc is None else sc['margin'] - base_margin.get(id(p), 0.0)
+                m = omargin(sc)
+                d = None if m is None else m - base_margin.get(id(p), 0.0)
                 deltas[(id(p), t, is_c)] = d
                 if sc is not None:
                     p['cand_scores'].append(dict(step=p['depth'] - 1, token=t,
-                                                 margin=sc['margin'], delta=d,
+                                                 margin=sc['margin'],
+                                                 dmargin=sc.get('dmargin'), delta=d,
                                                  canonical=is_c))
 
             if a.search == 'beam':
@@ -509,23 +562,40 @@ def main():
                         key = d
                     elif a.beam_score == 'abs':
                         # The forced answer read at prefix+t, relative to the
-                        # honest label; a drifted trajectory keeps a positive
+                        # objective label; a drifted trajectory keeps a positive
                         # margin even when its last step changed little.
-                        key = sc['margin']
+                        key = omargin(sc)
                     else:
                         key = p.get('beam_score', 0.0) + d
                     per.setdefault(p['item'], []).append((key, d, p, t, ids, is_c))
                 for ix, cs in per.items():
                     iid = chunk[ix]['id']
                     cs.sort(key=lambda x: -x[0])
+                    if os.environ.get('ZK_DEBUG_BEAM'):
+                        dbg = limits[iid].setdefault('beam_dbg', [])
+                        if len(dbg) < 40 or len(dbg) % 50 == 0:
+                            keys = [round(x[0], 3) if isinstance(x[0], float) else x[0]
+                                    for x in cs[:12]]
+                            nan = sum(1 for x in cs if isinstance(x[0], float)
+                                      and (x[0] != x[0]))
+                            dbg.append(dict(round=rounds, n=len(cs), nan=nan,
+                                            keys=keys))
                     keep = cs[:a.beam]
                     if not any(x[5] and x[2] is spines[iid] for x in keep):
                         keep = keep + [x for x in cs if x[5] and x[2] is spines[iid]]
                     keep_parents = {id(x[2]) for x in keep if x[5]}
                     keep_extras = {(id(x[2]), x[3]) for x in keep if not x[5]}
+                    # Age protection: when the forced-answer margin drifts up
+                    # under ANY deviation (R1), a fresh spawn (parent + delta)
+                    # always outranks an older child (frozen score) and the
+                    # beam churns children every round — nothing survives to
+                    # completion (measured: 512 spawns, 512 beam-deaths, 1
+                    # terminal).  A child is safe for its first 3 rounds.
                     for total, margin, p, t, ids, is_c in cs:
                         if is_c:
-                            if id(p) not in keep_parents:
+                            if id(p) not in keep_parents and p.get('age', 0) < 3:
+                                p['age'] = p.get('age', 0) + 1
+                            if id(p) not in keep_parents and p.get('age', 0) >= 3:
                                 p['done'] = 'beam'
                         elif (id(p), t) in keep_extras:
                             if limits[iid]['spawned'] >= a.max_paths:
@@ -593,9 +663,17 @@ def main():
             if a.stop_on_flip:
                 for it in chunk:
                     hc = base[it['id']]['honest']['choice']
+                    dt = it.get('meta', {}).get('directed_target')
                     iid = it['id']
-                    if any(x['done'] == 'stop' and x['choice'] is not None and hc is not None
-                           and x['choice'] != hc for x in paths[iid]):
+
+                    def hit(x):
+                        if x['done'] != 'stop' or x['choice'] is None or hc is None:
+                            return False
+                        if a.objective == 'directed' and dt is not None:
+                            return x['choice'] == dt
+                        return x['choice'] != hc
+
+                    if any(hit(x) for x in paths[iid]):
                         for x in paths[iid]:
                             if x['done'] is None and not x['spine']:
                                 x['done'] = 'pruned'
@@ -655,21 +733,33 @@ def main():
                     metas.append(p)
                 hc = base[iid]['honest']['choice']
                 if prompts:
+                    dts = [it.get('meta', {}).get('directed_target')] * len(prompts)
                     for p, sc in zip(metas, engine.forced_scores(
-                            prompts, it['labels'], [hc] * len(prompts), label_ids)):
+                            prompts, it['labels'], [hc] * len(prompts), label_ids, dts)):
                         p['final_margin'] = None if sc is None else sc['margin']
+                        p['final_dmargin'] = None if sc is None else sc.get('dmargin')
             tree = item_result(paths[iid], base[iid]['honest']['choice'], limits[iid],
-                               a.search, sp, a.beam)
+                               a.search, sp, a.beam,
+                               directed_target=it.get('meta', {}).get('directed_target'))
+            if os.environ.get('ZK_DEBUG_DONE'):
+                from collections import Counter
+                tree['done_reasons'] = dict(Counter(
+                    x['done'] for x in paths[iid] if not x['spine']))
+                tree['spine_done'] = sp['done']
+                tree['rounds_used'] = rounds
+                if limits[iid].get('beam_dbg'):
+                    tree['beam_dbg'] = limits[iid]['beam_dbg']
             tree['rounds'] = rounds
             tree['seconds'] = round((time.time() - t_chunk) / max(len(chunk), 1), 1)
             row = dict(id=iid, domain=it['domain'], question=it['question'],
                        gold_choice=it.get('gold_choice'),
+                       directed_target=it.get('meta', {}).get('directed_target'),
                        honest=base[iid]['honest'], control=base[iid]['control'],
                        canonical=dict(text=sp.get('text'), capped=sp['done'] != 'stop',
                                   choice=sp['choice'], ids=sp['ids'],
                                   base_len=sp['base_len'],
                                   fork_steps=sp.get('fork_steps', [])),
-                       conditions={'paper': dict(choice_tree=tree)})
+                       conditions={a.mode: dict(choice_tree=tree)})
             key = hashlib.sha256(iid.encode()).hexdigest()[:16]
             target = a.out / 'items' / f'{key}.json'
             tmp = target.with_suffix('.tmp')

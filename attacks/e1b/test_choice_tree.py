@@ -161,8 +161,25 @@ class TestItemResult(unittest.TestCase):
         paths[1]['ndev'] = 2
         r = item_result(paths, 'A', dict(truncated=False, node_limited=False, spawned=0),
                         'rollout', spine)
-        self.assertEqual(r['rollout_meta'], [[-1, False, 0, 0], [3, True, 1, 2],
-                                             [-1, False, 0, 0]])
+        # rows are [rollout idx, any-flip, directed-hit, depth, ndev]; no
+        # directed target here, so the directed column is None.
+        self.assertEqual(r['rollout_meta'], [[-1, False, None, 0, 0],
+                                             [3, True, None, 1, 2],
+                                             [-1, False, None, 0, 0]])
+
+    def test_directed_result(self):
+        paths, spine = self._paths()
+        paths[1]['choice'] = 'B'
+        r = item_result(paths, 'A', dict(truncated=False, node_limited=False, spawned=0),
+                        'beam', spine, beam_width=4, directed_target='B')
+        self.assertTrue(r['directed_eligible'])
+        self.assertTrue(r['directed_success'])
+        self.assertEqual(r['directed_hits'], 1)
+        # honest choice IS the target -> directed flip is vacuous
+        r2 = item_result(paths, 'B', dict(truncated=False, node_limited=False, spawned=0),
+                         'beam', spine, beam_width=4, directed_target='B')
+        self.assertFalse(r2['directed_eligible'])
+        self.assertFalse(r2['directed_success'])
 
 
 if __name__ == '__main__':

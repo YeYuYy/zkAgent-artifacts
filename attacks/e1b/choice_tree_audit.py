@@ -90,7 +90,14 @@ def main():
     detail = []
     for row in rows:
         totals['items'] += 1
-        tree = ((row.get('conditions') or {}).get('paper') or {}).get('choice_tree') or {}
+        conds = row.get('conditions') or {}
+        # choice_tree.py keys by mode ('paper'/'free-r'); choice_tree_attn.py
+        # keys by 'arm|mode|objective' — audit whichever is present.
+        tree = {}
+        for c in conds.values():
+            tree = (c or {}).get('choice_tree') or {}
+            if tree:
+                break
         totals['flips'] += int(bool(tree.get('success')))
         traces = [('canonical', row.get('canonical') or {})]
         if tree.get('best'):

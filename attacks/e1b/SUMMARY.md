@@ -386,6 +386,84 @@ attn:adversarial slot 翻转)、封顶者仍是自我纠正;③ Qwen3-8B 的零�
 - 诚实边界:canon=reach 内 argmax 是 coin 选择的代理;树的预算(每组 2 方案、3000 token)
   远未穷尽;关系失败步(超出容忍带)按 capped 处理、不计翻转。
 
+### E1b-choice-m2w — Mind2Web 决策轮 + 定向翻转 + 注意力杠杆(2026-11-12/13,完成)
+
+三件新事(计划/复现细节 `notes/M2W-ATTN-RUNS-2026-11-12.md`):
+
+**(a) Mind2Web 静态元素选择数据**(`data/mind2web-choice-150.jsonl`,HF `osunlp/Mind2Web`
+train,409 标注取 150):每标注一个决策轮——**历史固定在 prompt 里**(≤8 条 action repr),
+只攻击当前轮生成的 token;4 选 1 元素(目标 + 同页交互元素干扰项,`cleaned_html` 抽取文本);
+`meta.directed_target` = 最易混干扰项(同标签优先、任务词重叠最大)。70+ 网站。
+
+**(b) 定向翻转(directed ASR)**:beam 目标改为
+`dmargin = log p(directed_target) − log Σ p(other)`(forced-answer cue 处),命中 =
+正常结束且选择恰为 directed target。
+
+**Mind2Web natural,n=150,paper,beam8(Qwen3 cum=R1 abs,见 (d) churn 修正)**:
+
+| 模型·目标 | eligible | ASR | null | 随机可容许轨迹 |
+|---|---|---|---|---|
+| Qwen3-8B any(cum) | 133 | **75.9%**(abs **91.9%**) | 13.4% | 28.9% |
+| Qwen3-8B directed | 109 | **61.5%**(67 翻转全部落在指定目标) | 1.8% | 11.9% |
+| R1-7B any(abs) | 96 | 33.3% | 29.0% | 59.6% |
+| R1-7B directed(abs) | 97 | 39.0% | 7.8% | 24.3% |
+
+R1 的 ASR≈null:其 Mind2Web 决策本身极不稳(重采样 null 29-47%),可翻空间被噪声吃掉。
+
+**(c) 注意力杠杆上 vLLM**(`experiments/attn_slack_vllm.py` + `choice_tree_attn.py`):
+运行时 monkeypatch Qwen2/3Attention——按 (layer, head) 对**本次 forward 新算的行**的
+注意力输出乘 1±ρ(ρ=7088/2^20,两极带模型;等价于该行选带内 row mass)。三个实现要点
+(全部踩过坑并已验证):
+1. vLLM V1 默认**子进程**跑 EngineCore——patch 必须进程内(`VLLM_ENABLE_V1_MULTIPROCESSING=0`,
+   install() 设置);
+2. torch.compile 会把 sign buffer 常量化(实测 compiled margin shift 1e-7 vs eager 0.125)
+   ——注意力运行一律 **enforce-eager**(R1 另有 flash-attn 偶发 illegal-memory-access,
+   eager 一并规避);
+3. layer index 在 DecoderLayer `__init__` patch 里解析(regex 进 forward 会炸 dynamo)。
+
+数值验证(`runs-choice/attn-validate-*.json`):cache-off 确定性 0.0;随机 per-(layer,head)
+符号把 top1−top2 margin 移动**中位 0.125 / 最大 0.25**(与 A0 的 attn_probe 量级一致);
+coherent(逐层同号)也有 0.125 中位;top-1 翻转 2/24。诚实边界:与 HF float32 参考的
+margin-shift 相关性未建立(pearson −0.09;bf16 下 ±0.68% 行缩放经 36 层放大 ~10×,
+机理假说,未深究)。缓存路径(只重算最后一行)读数噪声 ~0.13 logprob——fork 协议按
+"读到什么记什么"自洽,恢复是"噪声内"而非逐位。
+
+**运行协议**:S* 每题在决策点([spine+cue])逐层坐标上升(`--opt-objective margin|reach`,
+后者即"近似最大化单步可达 token"——在扰动 logits 下数 witnesses);每轮先 S*-probe 后
+canonical 调用(兼作缓存恢复);fork token 去重到唯一 config;spawn 调用在 fork 的 config
+下算 fork 行并把子路径 next-logits 交给 `_pending_lp`。审计:choice_tree_audit 复放
+deviation 自带的 (act,delta)(attn 分支记在 fork 的 `attn` 列表)——全部运行 0 失败
+(本节合计 ~430 万条检查)。
+
+**(d) beam-churn 病灶与修正(方法学)**:R1 上累计 Δ 打分(cum)退化——任何 fork 都把
+forced-answer margin 推高 ⇒ 新 spawn(parent+Δ)永远压过冻结分数的老子路径 ⇒ beam 每轮
+清光子路径,无一走到答案(实测 512 spawn / 512 beam-death / 1 terminal)。**abs 打分**
+(按路径自身当前 margin 排序)消除该退化;Qwen3 因翻得早(cum 也在 ~170 步翻)未暴露。
+R1 各臂已全部用 abs 重跑;两 runner 均加了 3 轮 age 保护。
+
+**WebShop natural 注意力 campaign(两模型 × {attn-only, attn+decode} × {any, directed},
+n=150,τ=1;Qwen3 主臂 cum、R1 主臂 abs;null_dir 均按各自 run)**:
+
+| 模型·臂 | any ASR | directed ASR | 对照:sampling paper | null (any/dir) |
+|---|---|---|---|---|
+| Qwen3 attn-only | 24.8% | 6.6% | 84.5% / 85.0% | 18.8% / 3.3% |
+| Qwen3 attn+decode(cum) | **84.9%** | **72.2%** | 84.5% / 85.0% | 18.8% / 4.4% |
+| Qwen3 attn+decode(abs) | 71.0% | — | abs spot-check | 18.8% / 4.3% |
+| R1 attn-only | 38.6% | 17.9% | 40.4% / 50.8% | 29.1% / 9.0% |
+| R1 attn+decode(abs) | **96.4%** | **95.1%** | 40.4% / 50.8% | 29.1% / 6.3% |
+
+- **"attn 能否接近 sampling"是模型相关的**:Qwen3 上 attn-only(25%)远弱于 sampling(85%)
+  ——单 S*、行均匀符号、每步菜单只有 2 个 canonical token;R1 上 attn-only(38.6%)≈
+  sampling(40.4%)。
+- **attn+decode 在 R1 上是压倒性放大**:96.4%/95.1%,比任一单独杠杆高 2.4×,比 null 高
+  67pp——注意力 fork 把 decode 的 witness 集合在扰动 logits 上并集,菜单结构变了。
+- Qwen3 hybrid(cum 84.9%)≈ sampling——注意力不再额外加成(其 decode 菜单本已够宽)。
+
+**诚实边界**:R1 WebShop 合格率 ~55%(1536 截断);WebShop/m2w 均为静态代理;注意力为
+两极带一阶子集、行均匀符号(全可容许集的子集 ⇒ 下界);S* 在决策点一次优化、全轮沿用;
+HF 相关性未建立(见上);cum/abs 在两模型间不一致(Qwen3 翻得早未暴露 churn,主臂沿用
+cum;R1 必须 abs)。
+
 ### E1b-choice — 无 gold 决策集(DailyDilemma / WebShop):paper reach × forced-answer beam(2026-11-11)
 
 此前所有决策攻击都建立在 GSM8K/MATH 上,ASR 的分母被 "honest 答对" 筛过。本节换成

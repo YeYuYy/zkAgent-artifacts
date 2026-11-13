@@ -100,6 +100,25 @@ def choice_summary(rows):
                                                    == r.get('honest', {}).get('choice'))]
         d['asr_stable'] = (len(flips_stable) / len(elig_stable)) if elig_stable else None
         d['eligible_stable'] = len(elig_stable)
+        # Directed arm: among eligible items whose honest choice is not itself
+        # the designated target, fraction steered exactly onto the target.
+        dir_pairs = [(r, x) for r, x in elig if x.get('directed_eligible')]
+        dir_hits = [(r, x) for r, x in dir_pairs if x.get('directed_success')]
+        d['directed_eligible'] = len(dir_pairs)
+        d['directed_hits'] = len(dir_hits)
+        d['asr_directed'] = (len(dir_hits) / len(dir_pairs)) if dir_pairs else None
+        # Null-directed baseline: a reseeded honest sample landing on the target.
+        dir_stable = [r for r, _ in dir_pairs
+                      if r.get('control', {}).get('choice') == r.get('directed_target')]
+        d['null_directed'] = (len(dir_stable) / len(dir_pairs)) if dir_pairs else None
+        rm = [x.get('rollout_meta') for _, x in cs if x.get('rollout_meta')]
+        if rm and dir_pairs:
+            # rollout_meta rows: [idx, any_flip, directed_hit, depth, ndev];
+            # directed baseline over the same eligible-and-directed set.
+            dh = [row[2] for _, x in cs if x.get('rollout_meta')
+                  and x.get('directed_eligible') for row in x['rollout_meta']
+                  if row[2] is not None]
+            d['rollout_directed'] = (sum(dh) / len(dh)) if dh else None
         attn = [x.get('attn') for _, x in cs if x.get('attn')]
         if attn:
             d['attn'] = dict(
