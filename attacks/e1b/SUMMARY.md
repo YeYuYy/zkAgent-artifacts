@@ -500,6 +500,44 @@ logit bound 指数,默认 20=E1a PoC 量级,artifact exp-digit 子系统本身�
 诚实边界:注意力侧(attention row 带检查)是谓词级(E1a)而非逐步证明级;本次验证
 仅覆盖解码关系;27/54 case 数受单证明成本限制,均为随机抽样构造。
 
+### E1b-fp32-perpos-q35 — fp32 注意力重测 + 逐位置符号 + Qwen3.5 缩放 Phase A(2026-11-14,完成)
+
+**(a) fp32 重测 + 逐位置(仅决策行)符号**(`choice_tree_attn --dtype float32
+--sign-rows {uniform,last}`;sign buffer 升级为 [L,H,P] 按绝对位置取行,同一 forward
+内不同行可带不同符号;WebShop natural,n=50,attn-only any;audit 全过):
+
+| 配置 | ASR | null |
+|---|---|---|
+| bf16 row-uniform(旧,n=150) | 24.8% | 18.8% |
+| **fp32 row-uniform** | **41.3%**(46 elig) | 12.0% |
+| **fp32 仅决策行(last)** | **29.5%**(44 elig) | 12.0% |
+
+- **bf16 低估了注意力杠杆**(24.8% → fp32 41.3%):bf16 的舍入运气平均抑制了菜单形成,
+  之前的"bf16 上界有偏"方向实际是**偏低**。
+- **逐位置自由度是真实但次要的放大**:只扰动决策行保留 71% 的 ASR(29.5/41.3)——
+  精细到行的操纵有效,支持行贡献其余。margin 层面 last-row 保留 ~88% 的位移
+  (0.027 vs 0.030 median,Qwen3-8B fp32 probe)。
+- 修复了原 attn runner 的评分 bug(S* 候选此前在 canonical config 下打分)。
+
+**(b) Qwen3.5 缩放 Phase A**(`experiments/scale_probe.py`,Mind2Web 决策轮,
+canonical spine 120 步 × 8 题;sample 面 bf16=关系忠实,attn 面 bf16=已知不可分辨):
+
+| 模型 | L×H(softmax 层) | paper reach(mean/med) | free-r reach(mean/med) | attn margin 位移(bf16) |
+|---|---|---|---|---|
+| Qwen3-8B | 36×32(全 softmax) | 1.74 / 1 | 8.9 / 4 | 0.030 med(fp32) |
+| Qwen3.5-4B | 32×16(**仅 8 层 softmax**,其余 GDN) | **3.84 / 3** | **30.2 / 40** | 0.0(全模式) |
+| Qwen3.5-9B | 32×16(8 层 softmax) | **2.88 / 2** | **25.1 / 33** | 0.0(全模式) |
+
+- **decode 面:Qwen3.5 的可达集比 Qwen3-8B 宽 ~3×**(free-r 25-30 vs 8.9;paper
+  2.9-3.8 vs 1.7)——新一代架构/校准使**采样容差攻击面更大**;4B > 9B(更小更平),
+  与"模型越大可达越多"的预期**方向相反**(家族内:代际>尺寸;R1/Qwen3 对比亦然)。
+- **attn 面:Qwen3.5 的 GDN kernel 只支持 bf16**(`DSL kernel only supports fp16/bf16`),
+  且 bf16 下 ±0.68% 杠杆位移恰为 0(比 Qwen3-8B 更彻底——其 flash-attn 还泄漏部分
+  fp32)⇒ **混合注意力架构上,注意力杠杆在现有 kernel 栈下无法以电路保真度模拟**
+  (结构性限制,记录为 honest boundary;decode 面测量不受影响)。
+- Qwen3.5 注意力补丁已就绪(Qwen3NextAttention 含 gate 路径;GDN 层不动),vLLM 0.33
+  经 `PYTHONPATH=$ROOT/py312-vllm35 + site.addsitedir`(cutlass .pth)可用。
+
 ### E1b-taubench — τ-bench 高影响动作选择 + fp32 注意力语义修正(2026-11-13,完成)
 
 **τ-bench 静态动作选择**(`data/taubench-choice-119.jsonl`,sierra-research/tau-bench:

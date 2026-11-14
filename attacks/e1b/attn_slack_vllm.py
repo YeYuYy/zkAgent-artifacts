@@ -63,20 +63,7 @@ def _mk_forward_next(orig, num_heads_attr='num_heads'):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
-        signs = getattr(self, '_slack_signs', None)
-        if signs is None:
-            signs = _SIGNED.get('buffer')
-        li = getattr(self, '_slack_layer_idx', None)
-        if li is None:
-            li = _layer_index(self)
-        if signs is not None and 0 <= li < signs.shape[0]:
-            h = getattr(self, num_heads_attr)
-            if h <= signs.shape[1]:
-                scale = 1.0 + _SIGNED['rho'] * signs[li, :h].to(
-                    dtype=attn_output.dtype, device=attn_output.device)
-                ao = attn_output.view(attn_output.shape[0], h, self.head_dim)
-                ao = ao * scale.view(1, h, 1)
-                attn_output = ao.view(attn_output.shape[0], h * self.head_dim)
+        attn_output = _slack_scale_rows(self, attn_output, positions)
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
         output, _ = self.o_proj(attn_output)
@@ -119,40 +106,57 @@ def _mk_forward(orig, num_heads_attr='num_heads'):
             k = self.k_norm(k_by_head).view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-        # Prefer the per-module attribute (attached by attach()): torch.compile
-        # lifts module tensor attributes as graph inputs, so in-place sign
-        # updates stay visible in compiled/captured graphs.  The global-dict
-        # fallback is only for un-attached engines.
-        signs = getattr(self, '_slack_signs', None)
-        if signs is None:
-            signs = _SIGNED.get('buffer')
-        li = getattr(self, '_slack_layer_idx', None)
-        if li is None:
-            li = _layer_index(self)
-        if _SIGNED.get('debug_on'):
-            st = _SIGNED.setdefault('debug', dict(calls=0, scaled=0, lis={}, snone=0))
-            st['calls'] += 1
-            if signs is None:
-                st['snone'] += 1
-        if signs is not None:
-            h = getattr(self, num_heads_attr)
-            if 0 <= li < signs.shape[0] and h <= signs.shape[1]:
-                if _SIGNED.get('debug_on'):
-                    st['scaled'] += 1
-                    st['lis'][li] = st['lis'].get(li, 0) + 1
-                scale = 1.0 + _SIGNED['rho'] * signs[li, :h].to(
-                    dtype=attn_output.dtype, device=attn_output.device)
-                attn_output = attn_output.view(
-                    attn_output.shape[0], h, self.head_dim)
-                attn_output = attn_output * scale.view(1, h, 1)
-                attn_output = attn_output.view(
-                    attn_output.shape[0], h * self.head_dim)
+        attn_output = _slack_scale_rows(self, attn_output, positions)
         output, _ = self.o_proj(attn_output)
         return output
     return forward
 
 
-def install(rho=RHO, num_layers=64, num_heads=64, device='cuda'):
+def _slack_scale_rows(mod, attn_output, positions):
+    """Scale attention output rows per (layer, head, position).
+
+    The sign buffer is [L, H, P]; rows are gathered at each token's absolute
+    position, so one forward can carry DIFFERENT sign matrices per row (the
+    per-position relaxation).  A 2-D set_signs() broadcast-fills every
+    position, reproducing the original row-uniform behaviour.  Returns the
+    tensor unchanged when no signs are set (bitwise identity)."""
+    import torch
+    signs = getattr(mod, '_slack_signs', None)
+    if signs is None:
+        signs = _SIGNED.get('buffer')
+    li = getattr(mod, '_slack_layer_idx', None)
+    if li is None:
+        li = _layer_index(mod)
+    if signs is None or not (0 <= li < signs.shape[0]):
+        return attn_output
+    h = getattr(mod, 'num_heads')
+    if h > signs.shape[1]:
+        return attn_output
+    pos = positions
+    if pos.dim() > 1:
+        pos = pos.reshape(-1)
+    if pos.numel() != attn_output.shape[0]:
+        # mrope/other layouts: fall back to row-uniform slice 0
+        col = signs[li, :h, 0]
+    else:
+        col = signs[li, :h].index_select(1, pos.clamp(0, signs.shape[2] - 1))  # [H,T]
+        col = col.t()  # [T,H]
+    scale = 1.0 + _SIGNED['rho'] * col.to(dtype=attn_output.dtype,
+                                           device=attn_output.device)
+    ao = attn_output.view(attn_output.shape[0], h, mod.head_dim)
+    ao = ao * scale.view(attn_output.shape[0], h, 1)
+    return ao.view(attn_output.shape[0], h * mod.head_dim)
+
+
+def _alloc(rho=RHO, num_layers=64, num_heads=64, max_positions=16384, device='cuda'):
+    import torch
+    _SIGNED.update(rho=float(rho), installed=True,
+                   buffer=torch.zeros(num_layers, num_heads, max_positions,
+                                      dtype=torch.float32, device=device))
+    return _SIGNED['buffer']
+
+
+def install(rho=RHO, num_layers=64, num_heads=64, max_positions=16384, device='cuda'):
     """Patch Qwen2/Qwen3 attention forwards and pre-allocate the sign buffer.
 
     Must be called before vllm.LLM construction.  vLLM V1 spawns EngineCore in
@@ -168,9 +172,8 @@ def install(rho=RHO, num_layers=64, num_heads=64, device='cuda'):
     from vllm.model_executor.models import qwen2, qwen3
     if _SIGNED.get('installed'):
         return
-    _SIGNED.update(rho=float(rho), installed=True,
-                   buffer=torch.zeros(num_layers, num_heads, dtype=torch.float32,
-                                      device=device))
+    _alloc(rho=rho, num_layers=num_layers, num_heads=num_heads,
+           max_positions=max_positions, device=device)
     for mod, cls in ((qwen2, 'Qwen2Attention'), (qwen3, 'Qwen3Attention')):
         cls_obj = getattr(mod, cls, None)
         if cls_obj is None:
@@ -202,22 +205,31 @@ def install(rho=RHO, num_layers=64, num_heads=64, device='cuda'):
     return _SIGNED['buffer']
 
 
-def set_signs(matrix):
-    """Copy a {−1,0,+1}^{L×H} matrix into the live buffer (None -> zeros)."""
+def set_signs(matrix, positions=None):
+    """Write a {−1,0,+1}^{L×H} matrix into the live [L,H,P] buffer.
+
+    positions=None  -> broadcast to every position (row-uniform, the original
+                       behaviour);
+    positions=[p]   -> active only at the given absolute position(s), every
+                       other position canonical (the per-position relaxation).
+    None/zero matrix -> all canonical.  Returns the buffer."""
     import torch
     buf = _SIGNED.get('buffer')
     if buf is None:
         raise RuntimeError('install() first')
+    buf.zero_()
     if matrix is None:
-        buf.zero_()
         return buf
     t = torch.as_tensor(np.asarray(matrix, dtype=np.float32))
-    if t.shape != buf.shape:
-        buf.zero_()
-        n = min(t.shape[0], buf.shape[0]), min(t.shape[1], buf.shape[1])
-        buf[:n[0], :n[1]].copy_(t[:n[0], :n[1]])
+    nl, nh = min(t.shape[0], buf.shape[0]), min(t.shape[1], buf.shape[1])
+    core = torch.zeros(buf.shape[0], buf.shape[1], dtype=torch.float32)
+    core[:nl, :nh] = t[:nl, :nh]
+    if positions is None:
+        buf.copy_(core.unsqueeze(2).expand_as(buf))
     else:
-        buf.copy_(t.to(buf.device))
+        idx = torch.as_tensor(list(positions), dtype=torch.long)
+        for p in idx.tolist():
+            buf[:, :, min(p, buf.shape[2] - 1)] = core.to(buf.device)
     return buf
 
 
@@ -281,7 +293,8 @@ def attach(llm):
 
 def signs():
     import torch
-    return _SIGNED['buffer'].detach().cpu().to(torch.int32)
+    b = _SIGNED['buffer'].detach().cpu()
+    return b[:, :, 0].to(torch.int32) if b.dim() == 3 else b.to(torch.int32)
 
 
 def clear():

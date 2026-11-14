@@ -43,9 +43,20 @@ def canon_choice(engine, ids, base_len, labels):
     return choice_from_ids(engine, ids, base_len, labels)
 
 
-def slack_generate(engine, prompts, sp, signs):
-    """One generate() call under one global sign matrix (None = canonical)."""
-    slack.set_signs(signs)
+def slack_generate(engine, prompts, sp, signs, rows='uniform'):
+    """One generate() call under one sign matrix.
+
+    rows='uniform'  -> matrix active at every position (row-uniform);
+    rows='last'     -> matrix active ONLY at each prompt's last (decision)
+                       row — the per-position relaxation: one buffer write
+                       covers a heterogeneous batch because every prompt's
+                       decision row gathers its own position column."""
+    if signs is None:
+        slack.set_signs(None)
+    elif rows == 'last':
+        slack.set_signs(signs, positions=[len(p) - 1 for p in prompts])
+    else:
+        slack.set_signs(signs)
     try:
         return engine.llm.generate([{'prompt_token_ids': p} for p in prompts],
                                    [sp] * len(prompts), use_tqdm=False)
@@ -53,9 +64,9 @@ def slack_generate(engine, prompts, sp, signs):
         slack.set_signs(None)
 
 
-def next_lps(engine, prompts, signs=None):
+def next_lps(engine, prompts, signs=None, rows='uniform'):
     sp = engine.SP(temperature=0.0, max_tokens=1, logprobs=64, detokenize=False)
-    outs = slack_generate(engine, prompts, sp, signs)
+    outs = slack_generate(engine, prompts, sp, signs, rows)
     return [lp_dict(o.outputs[0].logprobs[0]) if o.outputs[0].logprobs else None
             for o in outs]
 
@@ -117,7 +128,7 @@ def optimise_signs(engine, spine_ids, labels, honest, directed, label_ids, a,
 
     def value(S):
         if a.opt_objective == 'reach':
-            lp = next_lps(engine, [spine_ids], signs=S)[0]
+            lp = next_lps(engine, [spine_ids], signs=S, rows=a.sign_rows)[0]
             if lp is None:
                 return None
             try:
@@ -125,9 +136,15 @@ def optimise_signs(engine, spine_ids, labels, honest, directed, label_ids, a,
                 return float(len(r.witnesses(H, a.mode)))
             except ValueError:
                 return None
-        slack.set_signs(S)
+        # margin objective: in 'last' mode the matrix is active only at the
+        # cue's final (decision) row
+        cue = spine_ids + engine.cue_ids
+        if a.sign_rows == 'last':
+            slack.set_signs(S, positions=[len(cue) - 1])
+        else:
+            slack.set_signs(S)
         try:
-            sc = engine.forced_scores([spine_ids + engine.cue_ids], labels,
+            sc = engine.forced_scores([cue], labels,
                                       [honest], label_ids,
                                       [directed or None])[0]
         finally:
@@ -188,7 +205,8 @@ def beam_search(engine, chunk, chats, base, a, paths, limits, spines, signs_by_i
                 groups.setdefault(id(S), (S, []))[1].append(p)
         slps = {}
         for _, (S, ps) in groups.items():
-            for p, lp in zip(ps, next_lps(engine, [p['ids'] for p in ps], signs=S)):
+            for p, lp in zip(ps, next_lps(engine, [p['ids'] for p in ps], signs=S,
+                                           rows=a.sign_rows)):
                 slps[id(p)] = (S, lp)
         need = [p for p in active if p.get('_pending_lp') is None]
         clps = next_lps(engine, [p['ids'] for p in need])
@@ -282,7 +300,18 @@ def beam_search(engine, chunk, chats, base, a, paths, limits, spines, signs_by_i
                       for i in ixs]
                 dts = [by_id[chunk[cand[i][0]['item']]['id']].get('meta', {}).get(
                     'directed_target') for i in ixs]
-                scs = engine.forced_scores(prompts, labels, hs, label_ids, dts)
+                # score each candidate under ITS fork's config (this was
+                # previously missed: S* candidates were scored canonically)
+                if S is None:
+                    slack.set_signs(None)
+                elif a.sign_rows == 'last':
+                    slack.set_signs(S, positions=[len(x) - 1 for x in prompts])
+                else:
+                    slack.set_signs(S)
+                try:
+                    scs = engine.forced_scores(prompts, labels, hs, label_ids, dts)
+                finally:
+                    slack.set_signs(None)
                 for i, sc in zip(ixs, scs):
                     scored[i] = sc
             okey = 'dmargin' if a.objective == 'directed' else 'margin'
@@ -396,7 +425,7 @@ def beam_search(engine, chunk, chats, base, a, paths, limits, spines, signs_by_i
                                        (S, []))[1].append(q)
                     for _, (S, qs) in byS.items():
                         for q, lp1 in zip(qs, next_lps(engine, [q['ids'] for q in qs],
-                                                       signs=S)):
+                                                       signs=S, rows=a.sign_rows)):
                             if lp1 is None:
                                 q['done'] = 'relation'
                             else:
@@ -461,6 +490,10 @@ def main():
     p.add_argument('--sign-scope', choices=['item', 'chunk'], default='item',
                    help='optimise one sign matrix per item, or share one per '
                         'chunk (cheaper rounds, weaker attack)')
+    p.add_argument('--sign-rows', choices=['uniform', 'last'], default='uniform',
+                   help="uniform: sign matrix active at every computed row "
+                        "(original); last: active ONLY at each probe's "
+                        "decision row — the per-position relaxation")
     p.add_argument('--opt-order', choices=['fwd', 'rev'], default='fwd')
     p.add_argument('--opt-objective', choices=['margin', 'reach'], default='margin',
                    help="what S* maximises: decision-point forced-answer margin, "
@@ -472,6 +505,10 @@ def main():
     p.add_argument('--max-paths', type=int, default=4096)
     p.add_argument('--batch', type=int, default=8)
     p.add_argument('--max-seqs', type=int, default=512)
+    p.add_argument('--dtype', choices=['bfloat16', 'float32'], default='bfloat16',
+                   help='engine dtype; float32 is the circuit-faithful setting '
+                        'for the +-0.68% attention lever (bf16 cannot resolve '
+                        'it — measured shifts 0 vs 0.0151)')
     p.add_argument('--enforce-eager', action='store_true', default=True,
                    help='required for the attention patch (compile bakes the '
                         'sign buffer); default on for this runner')
