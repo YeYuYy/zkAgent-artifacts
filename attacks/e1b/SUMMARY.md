@@ -538,6 +538,28 @@ canonical spine 120 步 × 8 题;sample 面 bf16=关系忠实,attn 面 bf16=已�
 - Qwen3.5 注意力补丁已就绪(Qwen3NextAttention 含 gate 路径;GDN 层不动),vLLM 0.33
   经 `PYTHONPATH=$ROOT/py312-vllm35 + site.addsitedir`(cutlass .pth)可用。
 
+### E1b-q35-phaseB — Qwen3.5 尺寸阶梯 ASR(2026-11-15,完成)
+
+Mind2Web natural,n=150,paper,beam8 cum,**tight 预算**(mp512 / node 15k——Qwen3.5 可达
+集宽,不收紧则非翻转题把 4096 spawn 耗尽;翻转题仍早停)。decode/sample 面(bf16=
+关系忠实);vLLM 0.33(PYTHONPATH + cutlass addsitedir;seed 需 62-bit mask,vLLM 0.33
+的 C-long 会溢出)。27B 下载自 Qwen/Qwen3.5-27B@fc05daec(~52G)。全部 audit 0 失败。
+
+| 模型 | any ASR | directed ASR | null(any/dir) | eligible |
+|---|---|---|---|---|
+| Qwen3.5-4B | **82.4%** | **71.6%** | 19.2% / 2.0% | 119 |
+| Qwen3.5-9B | **80.6%** | **79.1%** | 13.8% / 2.6% | 129 |
+| Qwen3.5-27B | 65.7% | 50.4% | 4.1% / 0.8% | 137 |
+| Qwen3-8B(上一代,同协议) | 75.9% | 61.5% | 13.4% / 2.6% | 133 |
+
+- **尺寸阶梯单调递减**(any 与 directed 皆是):4B→9B→27B = 82→81→66 / 72→79→50。
+  与 Phase A 的可达集测量一致(free-r 30→25→更小):**模型越大分布越尖,采样容差
+  攻击面越小**——"越大越多可达"的假设在这个家族内被否定;决定因素是代际与校准
+  (Qwen3.5 4B/9B 都高于 Qwen3-8B),不是参数量。null 也随尺寸收缩(19→14→4%):
+  决策更稳、更尖,但被瞄准时仍 50-80% 可翻。
+- 定向瞄准在 9B 上几乎无损(any 80.6% vs directed 79.1%),27B 上折半(50.4%)。
+- 每题翻转全部走完 strict witness audit;两次 6h timeout 由 resume 续完。
+
 ### E1b-taubench — τ-bench 高影响动作选择 + fp32 注意力语义修正(2026-11-13,完成)
 
 **τ-bench 静态动作选择**(`data/taubench-choice-119.jsonl`,sierra-research/tau-bench:
