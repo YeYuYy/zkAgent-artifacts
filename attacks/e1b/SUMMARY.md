@@ -4,6 +4,10 @@
 commit `af36422`)以及其解码/注意力关系所做的全部实验、结论,以及尚待完成的实验。
 所有结论都标注了诚实边界。实验代码在 `attacks/`(E1a)与 `attacks/e1b/`(E1b)。
 
+> 同目录配套文档:`README.md`(目录结构与逐文件说明)、`TIMELINE.md`(按时间排列的
+> "下一步要求 → 实际达成"进展线)、`FRONTIERS.md`(英文,可进论文的当前前沿结果:
+> **仅 paper 设计口径**,不含早期 preliminary 与 free-r 实现缺陷数字);各阶段详细报告在 `reports/`。
+
 ---
 
 ## 0. 背景:要攻破的性质
@@ -59,7 +63,7 @@ zkAgent 把解码也证进了电路,并声称采样币 `r = H(tr_<t) mod Θ` "�
 - **关键修正**:yield 完全取决于分布的熵。随机 logits 严重高估;真实推理模型很尖。
   且**早期我用 paper 模型(对 zkAgent 过于仁慈)低估了实现的威力**——free-r 下可达是 paper 的 ~5 倍。
 - 分叉点(top1−top2<0.1)虽少(~2–16%),但**翻转率恒为 100%**。
-- 代码:`attacks/e1b/dump_logits.py`、`yield_decode.cpp`、`freer_reach.cpp`、`reach_both.cpp`。
+- 代码:`attacks/e1b/yield_oracle/dump_logits.py`、`yield_decode.cpp`、`freer_reach.cpp`、`reach_both.cpp`。
 
 ### E1b-2 — Forced extension(强制不停 / 账单膨胀的"硬"路径)❌(对 zkAgent 无效)
 
@@ -67,7 +71,7 @@ zkAgent 把解码也证进了电路,并声称采样币 `r = H(tr_<t) mod Θ` "�
   **free-r 也挤不进**。所以**无法 force-skip 自信的停止点**。
 - 这与 proposal 自己的 landscape 表一致:zkAgent 行只列 "coin re-roll; tolerance steering",
   forced extension 是列给"解码不在证明里"的系统(TOPLOC/CoIn 等);zkAgent 把解码证了,故免疫。
-- 代码:`attacks/e1b/forced_extension.cpp`、`dump_until_stop.py`。
+- 代码:`attacks/e1b/forced_extension/forced_extension.cpp`、`dump_until_stop.py`。
 
 ### E1b-3 — Length-steering(账单膨胀的"软"路径:在可逆步注入续写词拉长推理)
 
@@ -84,7 +88,7 @@ R1-1.5B,cap 400–500:
 - **free-r:账单实质无上界**(注入率最高 63%,多次撞 cap;cap 是唯一在拦它的东西)。
 - **paper:modest 但非零**(1.0–1.22×)。P1 时几乎 0,P2-lexical 揭示论文设计**并非免疫**。
 - **诚实指标**:膨胀倍数被 cap 压扁,**注入次数/率是 cap 无关的真实信号**。
-- 代码:`attacks/e1b/e1b_length_steer.py`(`--skip-freer`、`--ngrid`)。
+- 代码:`attacks/e1b/length_steering/e1b_length_steer.py`(`--skip-freer`、`--ngrid`)。
 
 ### E1b-4 — Decision manipulation(强制输出错误答案)
 
@@ -97,7 +101,7 @@ R1-1.5B,cap 400–500:
 - 5 题成功率(proxy):**⚠️ 未完成,需重跑**。单题 lookahead 的翻转(7×8 → 42)成立;
   多题成功率那次 CPU 太慢(~0.6 forward/s)且时长不可控(翻不动的题会烧满 rollout)被中止。
   重跑建议:`--max-rollouts 12 --rollout 80`(翻不动早停),或直接并入下方"E1b 上规模"在 GPU 上做。
-- 代码:`attacks/e1b/decision_attack.py`(盲)、`decision_lookahead.py`(lookahead + 多题成功率)。
+- 代码:`attacks/e1b/decision/decision_attack.py`(盲)、`decision_lookahead.py`(lookahead + 多题成功率)。
 
 ### E1b-8B — 上规模(GPU, H200):Qwen3-8B ✅ / R1-Distill-7B ✅(GSM8K 各 n=150;τ 扫描 / MATH / vLLM 复刻见下)
 
@@ -219,7 +223,7 @@ free-r 下 probe 以**一半的注入率**(R1 58% vs 95%;Qwen3 41% vs 84%)达到
 
 ### E1b-5 — 决策操纵的修正:哈希链重投 → 轨迹级 best-of-N(2026-11-05)
 
-> 机制全貌与本次代码改动清单见 `attacks/e1b/E1b-NEXT.md`;下为结果摘要。
+> 机制全貌与本次代码改动清单见 `attacks/e1b/reports/E1b-NEXT.md`;下为结果摘要。
 
 **动机(之前低估了 paper 设计的威力)**:E1b-4 / `eval_at_scale.py` 的 lookahead 在注入一个
 可达错数字后**贪心续写**,只检验了**一条**下游轨迹。但采样币 `r = H(tr_<t) mod Θ` 是对承诺前缀
@@ -227,7 +231,7 @@ free-r 下 probe 以**一半的注入率**(R1 58% vs 95%;Qwen3 41% vs 84%)达到
 自身分布的续写。攻击者因此可在整条轨迹上做 **best-of-N**:挑一个可达腐蚀,再探 N 条可容许的下游币链,
 留任一条"错且未被自我纠正"的。贪心版漏掉了这一放大。
 
-**修正实现**:`attacks/e1b/decision_bestofN.py` 把贪心续写换成**采样续写**(τ 下对 active top-k 的
+**修正实现**:`attacks/e1b/decision/decision_bestofN.py` 把贪心续写换成**采样续写**(τ 下对 active top-k 的
 categorical = 诚实解码本身;重投币 = 从模型分布里重采样),并做 best-of-N。续写模式:
 `greedy`(旧的保守基线)/`sample`(claim-1 的 best-of-N 基线)/`steer`(启发式:在可达集内封掉
 自我纠正词 Wait/But/recheck/… ——set-valued 自由度允许的前提下,压制 SUMMARY 发现的"翻转被自我纠正
@@ -258,7 +262,7 @@ E1a 只证了注意力 verifier 接受上千个 ζ(谓词层),**未量化下游*
 不是承诺行质量**,故均匀 ζ 平移**不抵消**——可容许的行质量 `Θ_row∈[θ±ε]` 把整行输出缩放
 `g∈[1−ε/θ, 1+ε/θ] = 1±0.676%`。"两极"即 `g=1∓ρ`,每个 (层, 头, query 行) 由 prover 独立选。
 
-**实现**:`attacks/e1b/attn_slack_logits.py` 在 GPT-2 124M(**正是释出的 zkAgent artifact 模型**)上 hook
+**实现**:`attacks/e1b/attention/attn_slack_logits.py` 在 GPT-2 124M(**正是释出的 zkAgent artifact 模型**)上 hook
 `eager_attention_forward`,按 g 缩放每行注意力上下文(c_proj 之前),重跑前向读末步 logits。扰动模式:
 coherent±(全同号)、random(逐行随机 ±ρ 集成)、adversarial(对 top1→top2 margin 做 autograd,逐行取
 一阶最优号——仍是可容许扰动)。
@@ -356,7 +360,7 @@ attn:adversarial slot 翻转)、封顶者仍是自我纠正;③ Qwen3-8B 的零�
 都取自当步可达集(前缀已变则逐步重算),轨迹按构造可容许,strict ≡ lenient,逐 token
 成员性 assert 作为自检(全程零触发)。
 
-- **参考实现**:`attacks/e1b/tree_attack.py`(可复用 `tree_attack(...)`,与 argparse/模型
+- **参考实现**:`attacks/e1b/decision/tree_attack.py`(可复用 `tree_attack(...)`,与 argparse/模型
   解耦)+ `decision_bestofN.py --search tree`(KV 续传步进器、canon=reach 内 logit 最高者
   ——**这是对 coin 选择的代理**,已注释)。数字串聚成 quantity-group,标记 prompt 操作数;
   组排序:≥2 可达 mention 优先、更靠近 `\boxed` 优先;方案 A(整组一致翻 d→d′)/
@@ -645,13 +649,14 @@ token、每题中位多 5 个 fork。n=20 小样本,且 on 臂额外 logits 来�
 honest 决策本身有采样方差(换 batch 的浮点差会让 1–3% 的题 canonical 翻转);ASR 是
 搜索下界;注意力轴样本小且有一阶占位模型;全部结果仅 Qwen3-8B。
 
-**文件**:细节 `attacks/e1b/E1b-choice-RESULTS.md`(主结果 §4.9、bug 复盘 §4.11)、
-按方向逐条回答 `E1b-choice-ANSWER.md`、计划与执行修正 `E1b-choice-NEXT.md`、
-每题搜索规模 `E1b-choice-feasible-v2.jsonl`;代码 `choice_tree.py`(vLLM)、
-`choice_tree_hf.py`(attention)、`choice_tree_audit.py`、`choice_report.py`、
-`choice_scoring.py`、`choice_data.py`、`build_choice_data.py`、`choice_rollout_stats.py`、
-`choice_margin_auc.py`、`choice_attn_stats.py`、`choice_feasible_table.py`;
-测试 `test_choice_*.py`。运行产物在 worker 共享存储
+**文件**:细节 `attacks/e1b/reports/E1b-choice-RESULTS.md`(主结果 §4.9、bug 复盘 §4.11)、
+按方向逐条回答 `attacks/e1b/reports/E1b-choice-ANSWER.md`、计划与执行修正
+`attacks/e1b/reports/E1b-choice-NEXT.md`、
+每题搜索规模 `attacks/e1b/data/E1b-choice-feasible-v2.jsonl`;代码在本仓库的快照副本
+`attacks/e1b/choice/`(choice_tree / choice_tree_hf / choice_tree_audit / choice_report /
+choice_scoring / choice_data / build_choice_data / choice_rollout_stats /
+choice_margin_auc / choice_attn_stats / choice_feasible_table + 测试,正本在
+`/root/zk_agent/experiments/`)。运行产物在 worker 共享存储
 `/mnt/shared-storage-user/ai4good1-share/guodadi/zk_agent_gpu/runs-choice/qwen3/*-v2/`。
 
 ---
@@ -751,19 +756,19 @@ honest 决策本身有采样方差(换 batch 的浮点差会让 1–3% 的题 ca
 
 | 脚本 | 覆盖的后续实验 | 验证状态 |
 |---|---|---|
-| `attacks/e1b/eval_at_scale.py` | #1 上规模(GSM8K/MATH,两模型,decision+billing,**含 #4 τ-sweep=`--temperature`**,#5 `--ngrid`) | ✅ 端到端跑通(1.5B+custom+CSV);数字是 smoke 噪声 |
-| `attacks/e1b/train_length_probe.py` | #2 真·P2 value probe(隐状态→剩余长度,ridge) | ✅ 跑通(1.5B,held-out corr=0.85,R²=0.72) |
+| `attacks/e1b/scale_harness/eval_at_scale.py` | #1 上规模(GSM8K/MATH,两模型,decision+billing,**含 #4 τ-sweep=`--temperature`**,#5 `--ngrid`) | ✅ 端到端跑通(1.5B+custom+CSV);数字是 smoke 噪声 |
+| `attacks/e1b/length_steering/train_length_probe.py` | #2 真·P2 value probe(隐状态→剩余长度,ridge) | ✅ 跑通(1.5B,held-out corr=0.85,R²=0.72) |
 
 放大运行(GPU 机):
 ```bash
 # 决策操纵 + 账单膨胀,GSM8K 全 test,两模型;换 --model 为 8B+
-python3 attacks/e1b/eval_at_scale.py --model <8B-reasoning-model> --device cuda \
+python3 attacks/e1b/scale_harness/eval_at_scale.py --model <8B-reasoning-model> --device cuda \
     --dataset gsm8k --split test --limit 1319 --task both --models free-r,paper \
     --max-new 1024 --rollout 512 --max-steps 400 --max-rollouts 60 --ngrid 3000 \
     --csv gsm8k_eval.csv
 # 温度依赖:--temperature 0.6 / 0.8 / 1.0 各跑一遍
 # 价值探针(先训练,之后可接进 eval 的 P2 选择):
-python3 attacks/e1b/train_length_probe.py --model <model> --device cuda --dataset gsm8k --limit 500
+python3 attacks/e1b/length_steering/train_length_probe.py --model <model> --device cuda --dataset gsm8k --limit 500
 ```
 指标:`honest_acc` / `attacked_acc` / `flip_success`(decision),`median_inflation` / `mean_injrate`(billing)。
 
@@ -786,30 +791,40 @@ LIB=cmake-build-release
 g++ -std=c++14 -O2 -fopenmp -mcmodel=large -Isrc -I3rd -I3rd/mcl/include \
     attacks/setvalued_decode.cpp  $LIB/src/libgpt_lib.a $LIB/lib/libmcl.a -lgmp -lcrypto -o setvalued_decode
 # E1b oracle(任选其一,同样方式编译):
-#   attacks/e1b/{yield_decode,freer_reach,reach_both,forced_extension}.cpp
+#   attacks/e1b/yield_oracle/{yield_decode,freer_reach,reach_both}.cpp
+#   attacks/e1b/forced_extension/forced_extension.cpp
 # E1b 需要真实 logits / 重生成的部分是 Python(torch + transformers):
-python3 attacks/e1b/dump_logits.py --model openai-community/gpt2 --prompt "..." --out logits.txt
-python3 attacks/e1b/e1b_length_steer.py --cap 400           # 账单膨胀,两模型
-python3 attacks/e1b/decision_lookahead.py --max-rollouts 40 # 决策翻转成功率,两模型(旧·贪心)
+python3 attacks/e1b/yield_oracle/dump_logits.py --model openai-community/gpt2 --prompt "..." --out logits.txt
+python3 attacks/e1b/length_steering/e1b_length_steer.py --cap 400           # 账单膨胀,两模型
+python3 attacks/e1b/decision/decision_lookahead.py --max-rollouts 40 # 决策翻转成功率,两模型(旧·贪心)
 # E1b-5 决策修正(哈希链重投 → 采样 best-of-N;--device cuda 可放 8B):
-python3 attacks/e1b/decision_bestofN.py --rollout-mode greedy --models free-r,paper   # 旧基线
-python3 attacks/e1b/decision_bestofN.py --rollout-mode sample --bestof 6               # claim-1 放大
-python3 attacks/e1b/decision_bestofN.py --rollout-mode steer  --bestof 6               # + 自我纠正抑制启发式
+python3 attacks/e1b/decision/decision_bestofN.py --rollout-mode greedy --models free-r,paper   # 旧基线
+python3 attacks/e1b/decision/decision_bestofN.py --rollout-mode sample --bestof 6               # claim-1 放大
+python3 attacks/e1b/decision/decision_bestofN.py --rollout-mode steer  --bestof 6               # + 自我纠正抑制启发式
 # E1b-attn 注意力容差 → 解码 logit 扰动(GPT-2 124M = zkAgent artifact 模型):
-python3 attacks/e1b/attn_slack_logits.py --model openai-community/gpt2
+python3 attacks/e1b/attention/attn_slack_logits.py --model openai-community/gpt2
 ```
 
-文件清单:
+文件清单(2026-11-15 重组为子目录;完整逐文件说明见 `attacks/e1b/README.md`):
 - `attacks/` — E1a(set-valued 端到端)+ README
-- `attacks/e1b/dump_logits.py / dump_until_stop.py` — 真实 logits 导出(量化进 zkAgent 整数域)
-- `attacks/e1b/yield_decode.cpp / freer_reach.cpp / reach_both.cpp` — 可达性 / yield(两模型)
-- `attacks/e1b/forced_extension.cpp` — forced-extension 判定(负面结论)
-- `attacks/e1b/e1b_length_steer.py` — 账单膨胀重生成(P1/P2,两模型)
-- `attacks/e1b/decision_attack.py / decision_lookahead.py` — 决策操纵(盲 / 贪心 lookahead,多题成功率)
-- `attacks/e1b/decision_bestofN.py` — **E1b-5 决策修正**:哈希链重投 → 采样 best-of-N(greedy/sample/steer 三模式 + 复述靶向启发式)
-- `attacks/e1b/attn_slack_logits.py` — **E1b-attn**:注意力容差(±ε/θ 两极)→ 解码 logit 扰动 / 可达集增量
-- `attacks/e1b/eval_at_scale.py` — **放大版主评测**(任意 HF 模型 + GSM8K/MATH,两模型,decision+billing,τ-sweep)
-- `attacks/e1b/train_length_probe.py` — 真·P2 value probe(隐状态→剩余长度)
+- `attacks/e1b/yield_oracle/` — `dump_logits.py` 真实 logits 导出(量化进 zkAgent 整数域);
+  `yield_decode.cpp / freer_reach.cpp / reach_both.cpp` 可达性 / yield(两模型)
+- `attacks/e1b/forced_extension/` — `forced_extension.cpp`(判定,负面结论)、
+  `dump_until_stop.py / e1b_forced.py`(停止点轨迹导出 / 合并实验)
+- `attacks/e1b/length_steering/` — `e1b_length_steer.py` 账单膨胀重生成(P1/P2,两模型;
+  **也是全部本地脚本共享的 relation/reach 库**)、`bill_inflation.py`、`train_length_probe.py`(真·P2 value probe)
+- `attacks/e1b/decision/` — `decision_attack.py`(盲)/ `decision_lookahead.py`(贪心 lookahead)、
+  `decision_bestofN.py` **E1b-5 决策修正**(哈希链重投 → 采样 best-of-N,greedy/sample/steer 三模式 + 复述靶向启发式)、
+  `tree_attack.py`(E1b-tree 可容许树搜索,可复用、torch-free)
+- `attacks/e1b/attention/` — `attn_reach.py`(AttnSlack hook + union_reach,共享库)、
+  `attn_slack_logits.py` **E1b-attn**(注意力容差 ±ε/θ 两极 → 解码 logit 扰动 / 可达集增量)、
+  `attn_slack_vllm.py / attn_slack_validate.py`(vLLM patch 与验证,harness 快照)
+- `attacks/e1b/scale_harness/` — `eval_at_scale.py` **放大版主评测**(任意 HF 模型 + GSM8K/MATH,
+  两模型,decision+billing,τ-sweep);`vllm_bestofn.py / scale_probe.py / validate_simulation.py`
+  (H200 harness 快照,正本在 `/root/zk_agent/experiments/`)
+- `attacks/e1b/choice/` — E1b-choice → m2w → τ-bench → Qwen3.5 全部 choice 攻击/分析脚本(harness 快照)
+- `attacks/e1b/reports/` — 各阶段计划/结果报告(SUMMARY 之外的 7 篇)
+- `attacks/e1b/data/` — choice 数据集与可行性输出的本地快照
 
 > 早期 Python 实验在 1.5B 推理模型上于纯 CPU 运行;E1b-5 / E1b-attn 的 smoke 在本机单卡 GPU
 > (1.5B fp16 / GPT-2 fp32)运行。C++ oracle 与 Python 量化/可达性已逐位对齐校验。
@@ -886,5 +901,5 @@ python3 -m experiments.choice_feasible_table $R/runs-choice/qwen3/dd-short-beam8
 ```
 
 文件:`experiments/{choice_tree,choice_tree_hf,choice_tree_audit,choice_report,choice_scoring,choice_data,build_choice_data,choice_rollout_stats,choice_margin_auc,choice_attn_stats,choice_feasible_table}.py`,
-`tests/test_choice_*.py`;地址副本在本目录。运行产物在
+`tests/test_choice_*.py`;地址副本在 `attacks/e1b/choice/`。运行产物在
 `$R/runs-choice/qwen3/*-v2/`(含 items/、summary.json、config.json)。

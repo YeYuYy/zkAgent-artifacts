@@ -131,15 +131,15 @@ H200 vLLM harness).
 ### Repro (smoke)
 ```bash
 # attention magnitude (A0-style), GPT-2 = zkAgent artifact model
-python3 attacks/e1b/attn_slack_logits.py --model openai-community/gpt2
+python3 attacks/e1b/attention/attn_slack_logits.py --model openai-community/gpt2
 # corrected decision attack (paper), sampled best-of-N, GSM8K
-python3 attacks/e1b/decision_bestofN.py --dataset gsm8k --models paper \
+python3 attacks/e1b/decision/decision_bestofN.py --dataset gsm8k --models paper \
     --rollout-mode sample --bestof 32 --attn on --device cuda --limit 50
 # MATH-500 Level 4-5
-python3 attacks/e1b/decision_bestofN.py --dataset math --math-levels 4,5 --models paper \
+python3 attacks/e1b/decision/decision_bestofN.py --dataset math --math-levels 4,5 --models paper \
     --rollout-mode steer --bestof 32 --attn on --device cuda --limit 150
 # billing with attention band, tau sweep
-python3 attacks/e1b/eval_at_scale.py --dataset math --math-levels 4,5 --task billing \
+python3 attacks/e1b/scale_harness/eval_at_scale.py --dataset math --math-levels 4,5 --task billing \
     --models paper --attn on --temperature 1.0 --device cuda --limit 150
 ```
 At scale (8B): same flags, ported into the H200 vLLM step-loop harness; `--device cuda`,

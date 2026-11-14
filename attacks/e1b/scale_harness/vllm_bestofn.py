@@ -1,7 +1,7 @@
 """Corrected E1b decision evaluation (hash-chain best-of-N) on a vLLM engine.
 
 Replaces the single-continuation decision search of evaluate.py/vllm_runner.py
-per E1b-5 (see attacks/e1b/E1b-NEXT.md): the earlier protocol tested ONE
+per E1b-5 (see attacks/e1b/reports/E1b-NEXT.md): the earlier protocol tested ONE
 continuation per injected digit, but the sampling coin is a hash chain over the
 committed prefix, so the attacker may re-roll every downstream coin and keep a
 best-of-N over whole trajectories. This runner measures ASR as a function of
@@ -249,7 +249,7 @@ class VEngine:
 
 
 class AttnEngine:
-    """HF eager-attention port of attacks/e1b/attn_reach.py (v0 placeholder):
+    """HF eager-attention port of attacks/e1b/attention/attn_reach.py (v0 placeholder):
     per-layer output scaling g in [1-rho, 1+rho], union over {coherent+,
     coherent-, adversarial sign} — a documented loose over-approximation of the
     committed-config reachable set. Used only at recorded fork steps."""

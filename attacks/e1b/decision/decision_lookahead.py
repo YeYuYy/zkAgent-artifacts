@@ -12,7 +12,8 @@ resulting wrong answer.
 """
 import argparse, re, sys
 import numpy as np, torch
-sys.path.insert(0, "attacks/e1b")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "length_steering"))
 from e1b_length_steer import quant, active_and_shift, reach_freeR, reach_paper, prefix_coin
 from transformers import AutoModelForCausalLM, AutoTokenizer
 

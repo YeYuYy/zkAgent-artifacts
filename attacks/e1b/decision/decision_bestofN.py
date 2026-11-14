@@ -30,7 +30,10 @@ import argparse, re, sys
 import numpy as np, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessor, LogitsProcessorList
 
-sys.path.insert(0, "attacks/e1b")
+from pathlib import Path
+_E1B = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_E1B / "length_steering"))
+sys.path.insert(0, str(_E1B / "attention"))
 from e1b_length_steer import quant, active_and_shift, reach_freeR, reach_paper, prefix_coin
 from attn_reach import AttnSlack, union_reach
 from tree_attack import tree_attack, argmax_in_reach, default_cfg as tree_cfg

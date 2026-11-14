@@ -19,7 +19,10 @@ validated bit-for-bit against the C++ oracle (see reach_both.cpp, freer_reach.cp
 """
 import argparse, csv, re, sys, time
 import numpy as np, torch
-sys.path.insert(0, "attacks/e1b")
+from pathlib import Path
+_E1B = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_E1B / "length_steering"))
+sys.path.insert(0, str(_E1B / "attention"))
 from e1b_length_steer import quant, active_and_shift, reach_freeR, reach_paper, prefix_coin
 from attn_reach import AttnSlack, union_reach
 from transformers import AutoModelForCausalLM, AutoTokenizer

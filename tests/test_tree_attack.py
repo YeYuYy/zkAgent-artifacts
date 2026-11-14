@@ -8,10 +8,10 @@ per step, so tests control forks exactly.
 import sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'attacks' / 'e1b'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'attacks' / 'e1b' / 'decision'))
 import numpy as np
-from attacks.e1b.tree_attack import (tree_attack, default_cfg, argmax_in_reach,
-                                     Stepper, operand_digits)
+from attacks.e1b.decision.tree_attack import (tree_attack, default_cfg, argmax_in_reach,
+                                              Stepper, operand_digits)
 
 V = 60
 DECODE = {i: str(i) for i in range(1, 10)}

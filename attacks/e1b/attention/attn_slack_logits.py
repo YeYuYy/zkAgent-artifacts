@@ -31,7 +31,8 @@ import numpy as np, torch
 import transformers.models.gpt2.modeling_gpt2 as g2
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-sys.path.insert(0, "attacks/e1b")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "length_steering"))
 from e1b_length_steer import quant, active_and_shift, reach_freeR, reach_paper, prefix_coin, ALPHA, THETA, EPS
 
 RHO = EPS / THETA                     # 7088 / 2^20 = 0.6759%

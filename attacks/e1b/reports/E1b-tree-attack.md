@@ -1,6 +1,6 @@
-任务：把 attacks/e1b/decision_bestofN.py 的决策操纵攻击从「注入一个错 token 后用 model.generate
+任务：把 attacks/e1b/decision/decision_bestofN.py 的决策操纵攻击从「注入一个错 token 后用 model.generate
 自由续写 + 事后审计」改成「全程约束在每步可达集内的、有预算上限的树状搜索」。先读
-attacks/e1b/SUMMARY.md 的 §E1b-5@7B/8B 和 attacks/e1b/E1b-NEXT.md 的 A 节了解机制与动机。
+attacks/e1b/SUMMARY.md 的 §E1b-5@7B/8B 和 attacks/e1b/reports/E1b-NEXT.md 的 A 节了解机制与动机。
 
 == 背景（必须理解，否则会改错）==
 - 采样币 r = H(tr_<\t) mod Θ 是对已提交前缀的哈希链（prefix_coin 给 H）。给定前缀，coin 确定，
@@ -64,7 +64,7 @@ Claude-Session: https://claude.ai/code/session_01Cccc9nVTDT9u2EUFqxEJgf
 ---
 ## Status (2026-11-08) — DONE
 
-- Reference: `attacks/e1b/tree_attack.py` (reusable `tree_attack(...)`, torch-free,
+- Reference: `attacks/e1b/decision/tree_attack.py` (reusable `tree_attack(...)`, torch-free,
   invariant asserted per step) + `decision_bestofN.py --search tree` (KV-resuming
   stepper, canon = argmax-within-reach proxy); tests in `tests/test_tree_attack.py`
   (invariant / constructed flip / paper-degenerate singleton reach).
