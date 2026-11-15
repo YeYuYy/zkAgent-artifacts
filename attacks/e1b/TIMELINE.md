@@ -139,9 +139,12 @@
   修正。`3f11a99`
 - **达成(LlamaAttention)**:vLLM patch 支持 LlamaAttention(0.33/0.11 均 next 式,
   逐类签名守卫),stub 单测 9/9;真模型 GPU 冒烟待下载完成。
-- **进行中(thinking 试跑)**:H200 worker 已起,8B fp32+thinking × M2W-409 前 20 题
-  ×{any,directed} 已排队(同跑验证 null-k);32B 下载 ~56%,到位后补两卡试跑
-  (`launch.py --gpus`);外推判定待计时。详见 `reports/P0-fullscale-progress.md`。
+- **达成(thinking 试跑)**:实测 8B 4.4 min/题(1×H200)、32B 8.9 min/题(2×H200 TP,
+  `launch.py --gpus` + worker 多卡放宽);表 1+2 全量外推 ≈14 GPU-天 ≈ 4.7 天墙钟
+  (<1 周)⇒ **不回退,整表 thinking on**。试跑顺带:新 null-k 协议 GPU 全链路通过
+  (witness 0 失败);发现并修复 null_dir 把 c₀==directed 计入的口径 bug(`9fe58c9`)。
+  五个模型(4B/8B/14B/32B、R1-Llama-8B)全部下载校验完毕。**P1 表 1 已开跑**
+  (worker2=32B 整行,worker1=14B 行,最贵优先)。详见 `reports/P0-fullscale-progress.md`。
 
 ---
 
@@ -160,4 +163,4 @@
 | 11-13 | 模拟忠实性 / τ-bench / bf16 一致性 | 模拟≡真 verifier;τ-bench 96.2/87.7%;bf16 不可模拟注意力 | `9d71967` `f93bd76` |
 | 11-14 | fp32 重测 + Phase A | attn-only 41.3%(fp32);Qwen3.5 可达集 ~3× 宽 | `7fb9fe4` `e0e9bfb` |
 | 11-15 | 尺寸阶梯 ASR | 82→81→66% 单调收缩;代际>尺寸 | `0fdf04b` |
-| 11-16 | P0(full-scale v1) | τ-bench v2(15+37,eligibility 程序化);协议定稿(null-k=5/fp32/预算统一);Llama patch;thinking 试跑进行 | `956d7bc` `18046c7` `3f11a99` |
+| 11-16 | P0(full-scale v1) | τ-bench v2(15+37,eligibility 程序化);协议定稿(null-k=5/fp32/预算统一);Llama patch;thinking 试跑判定保留;P1 表 1 开跑 | `956d7bc` `18046c7` `3f11a99` `9fe58c9` `99a0c1a` |
