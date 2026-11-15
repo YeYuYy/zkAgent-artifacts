@@ -57,20 +57,39 @@ attach() 为 Llama 模块预分配符号缓冲;clear() 完整还原;Qwen 路径�
 9/9(`tests/test_attn_slack_llama.py`)。真 Llama 前向 + attn 臂端到端待 R1-Distill-Llama-8B
 下载完成后在 H200 冒烟。
 
-### 5. thinking 成本试跑(§9)⏳ 进行中
+### 5. thinking 成本试跑(§9)✅ 完成 —— 判定:thinking 模式保留(满足 <1 周)
 
-H200 worker 已起(`zk-agent-p0-trial`)。已排队:Qwen3-8B fp32+thinking × Mind2Web
-409 版前 20 题 × {any, directed}(beam8/abs/4096 默认,max-new 2048),同跑即验证
-新 null-k 协议。Qwen3-32B(下载中 ~45%)到位后补 32B 两卡试跑(`launch.py` 已加
-`--gpus`,worker 单卡 assert 已放宽)。外推判定(>一周 ⇒ 整表回退默认模式)待计时。
+实测(fp32 + thinking,beam8/abs/4096,null-k=5 含在内,20 题/组,M2W-409):
+
+| 组 | 墙钟 | 每题 |
+|---|---|---|
+| Qwen3-8B any(1×H200) | 87 min | 4.4 min |
+| Qwen3-8B directed(1×H200) | 85 min | 4.3 min |
+| Qwen3-32B any(2×H200 TP) | 178 min | 8.9 min |
+
+外推(全量 n:M2W 354、τ-bench v2 52;表 1+表 2 解码面):4B≈0.5×、8B=1×、
+14B≈1.6×、32B=8.9min/题、R1-Llama-8B≈8B、Qwen3.5-9B≈8B ⇒ **解码面 ≈7 GPU-天,
+加 attention 臂 ≈14 GPU-天;现有 3×H200(1+2)≈ 4.7 天墙钟 < 1 周** ⇒ 按设计
+§9 判定**不回退,整表 thinking on**;若执行中出现 >30% 滑移(超时/排队),按预案
+整表回退默认模式并重跑(已跑的 20 题试跑数据可复用为表 3 种子)。
+
+**试跑顺带的首批结果(n=20,搜索下界,无 audit 结论,仅成本试跑口径)**:
+- 8B any:ASR-c₀ 0.74 [0.51,0.88](eligible 19/20),null_any 0.19 [0.12,0.28],
+  null_dir 0.017,ASR−null +0.55 [0.27,0.79];P(q̂=0)=0.53,ASR₀=0.70。
+- 8B directed:ASR-c₀ 0.45,null_any 0.29,null_dir 0.092,ASR−null +0.16。
+- 32B any(16 题中):ASR-eligible 0.77;null_any ≈0.26 —— thinking 下 32B 的
+  null 并不比 8B 低(小样本,全量表定论)。
+- 新 null-k 协议全链路在 GPU 验证通过(逐 token witness,0 失败);发现并修复
+  null_dir 统计把 c₀==directed 的题计进 directed 的口径 bug(`9fe58c9`)。
+
+## 排队中的后续(P1 起点)
+
+判定已定,按"最贵的排前面"开跑表 1(worker2=2×H200:Qwen3-32B 整行;worker1=1×H200:
+14B → 8B 续跑(试跑 20 题自动复用)→ 4B;全部 fp32 + thinking + null-k=5,预算
+beam8/abs/40000/4096)。τ-bench v2 首跑 smoke(20 题 retail)进行中——通过后再上
+全量;R1-Llama-8B attention patch 的 GPU 冒烟排在 smoke 之后。
 
 ## 模型下载(后台链)
 
 Qwen3-32B(pinned `9216db57`)→ R1-Distill-Llama-8B(`6a6f4aa4`)→ Qwen3-4B → Qwen3-14B,
-全部哈希校验(`download_model.py` 新增 pinned revisions)。
-
-## 排队中的后续(P1 起点)
-
-表 1(Qwen3 dense 4B/8B/14B/32B × M2W-409 + τ-bench v2,fp32,含 null-k 列)、
-表 2(Qwen3.5-9B 已在 mas_security_h200;R1-Llama-8B 待下载)。τ-bench v2 的首跑
-建议先 20 题 smoke 看 eligible/解析率,再上全量。
+全部哈希校验(`download_model.py` 新增 pinned revisions)。**五个模型全部就位。**
