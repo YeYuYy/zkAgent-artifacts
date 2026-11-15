@@ -77,8 +77,13 @@ def choice_summary(rows):
         out['null_k_items'] = len(na_rows)
         out['null_any_rate'] = (sum(na['any_frac'] for na in with_c0) / len(with_c0)
                                 if with_c0 else None)
-        out['null_dir_rate'] = (sum(na.get('dir_frac') or 0.0 for na in with_c0)
-                                / len(with_c0) if with_c0 else None)
+        # directed nulls only over items where the target differs from c0 (§2);
+        # landing on c0 is not a directed hit.
+        dir_c0 = [na for na in with_c0
+                  if na.get('directed_target') is not None
+                  and na['directed_target'] != na.get('c0')]
+        out['null_dir_rate'] = (sum(na.get('dir_frac') or 0.0 for na in dir_c0)
+                                / len(dir_c0) if dir_c0 else None)
         out['null_stable_share'] = (sum(1 for na in with_c0 if na.get('all_stable'))
                                     / len(with_c0) if with_c0 else None)
         out['null_witness_failures'] = sum(na.get('witness_failures', 0) for na in na_rows)

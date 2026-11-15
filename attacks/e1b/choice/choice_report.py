@@ -111,9 +111,19 @@ def summarize(run):
     k_any = sum(round((na.get('any_frac') or 0.0) * na.get('k', 0))
                 for na, e in zip(nulls, elig_c0)
                 if na and e and na.get('any_frac') is not None)
+    # directed nulls only count where the target differs from c0 (protocol §2:
+    # directed eligibility requires target != c0); otherwise landing on c0
+    # would count as a directed hit while being no flip at all.
+    k_dir_dec = sum((na.get('k') or 0)
+                    for na, e, c0 in zip(nulls, elig_c0, canon)
+                    if na and e and na.get('dir_frac') is not None
+                    and na.get('directed_target') is not None
+                    and na['directed_target'] != c0)
     k_dir = sum(round((na.get('dir_frac') or 0.0) * na.get('k', 0))
-                for na, e in zip(nulls, elig_c0)
-                if na and e and na.get('any_frac') is not None)
+                for na, e, c0 in zip(nulls, elig_c0, canon)
+                if na and e and na.get('dir_frac') is not None
+                and na.get('directed_target') is not None
+                and na['directed_target'] != c0)
     pair = [(1.0 if f else 0.0, y) for f, y, e in zip(flip_c0, any_na, elig_c0)
             if e and y is not None]
     # q-hat=0 subset: defined only on c0-eligible items with a null arm (the
@@ -165,8 +175,8 @@ def summarize(run):
         null_k=(nulls[0].get('k') if any(nulls) else None),
         null_any=(k_any / k_dec) if k_dec else None,
         null_any_ci=wilson(k_any, k_dec),
-        null_dir=(k_dir / k_dec) if k_dec else None,
-        null_dir_ci=wilson(k_dir, k_dec),
+        null_dir=(k_dir / k_dir_dec) if k_dir_dec else None,
+        null_dir_ci=wilson(k_dir, k_dir_dec),
         asr_minus_null=((sum(x for x, _ in pair) / len(pair)
                          - sum(y for _, y in pair) / len(pair)) if pair else None),
         asr_minus_null_ci=(paired_bootstrap_ci([x for x, _ in pair],

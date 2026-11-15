@@ -92,7 +92,7 @@ def test_summarize_fullscale():
                                   any_frac=sum(1 for c in choices if c != c0) / k,
                                   dir_frac=sum(1 for c in choices if c == '3') / k,
                                   all_stable=all(c == c0 for c in choices),
-                                  c0=c0, witness_failures=0))
+                                  c0=c0, directed_target='3', witness_failures=0))
     rows = [
         _row('i1', '1', ['2'], na(['1'] * 5)),              # flip, q=0
         _row('i2', '1', ['2'], na(['2', '2', '1', '1', '1'])),  # flip, q>0
@@ -101,7 +101,9 @@ def test_summarize_fullscale():
         _row('i5', None, ['2'], na([None] * 5)),            # c0 unparseable
         _row('i6', None, ['1'], dict(null_arm=dict(k=5, choices=[None] * 5,
                                                    any_frac=None, dir_frac=0.0,
-                                                   all_stable=False, witness_failures=0))),
+                                                   all_stable=False, c0=None,
+                                                   directed_target='3',
+                                                   witness_failures=0))),
     ]
     with tempfile.TemporaryDirectory() as d:
         run = Path(d)
