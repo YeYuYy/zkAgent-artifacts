@@ -67,6 +67,21 @@ def choice_summary(rows):
         canonical_agreement_rate=(sum(c is not None and c == h for c, h in zip(canon, honest))
                                   / sum(parsed) if sum(parsed) else None),
         conditions={})
+    # §2 null arm (full-scale protocol): K canonical re-decodes, coin-key-only
+    # changes.  any/dir rates are means of the per-item per-decision fractions
+    # (E[q_i]) over items whose c0 parses; absent entirely on pre-§2 runs.
+    na_rows = [r.get('null_arm') for r in rows if isinstance(r.get('null_arm'), dict)]
+    if na_rows:
+        with_c0 = [na for na in na_rows if na.get('any_frac') is not None]
+        out['null_k'] = na_rows[0].get('k')
+        out['null_k_items'] = len(na_rows)
+        out['null_any_rate'] = (sum(na['any_frac'] for na in with_c0) / len(with_c0)
+                                if with_c0 else None)
+        out['null_dir_rate'] = (sum(na.get('dir_frac') or 0.0 for na in with_c0)
+                                / len(with_c0) if with_c0 else None)
+        out['null_stable_share'] = (sum(1 for na in with_c0 if na.get('all_stable'))
+                                    / len(with_c0) if with_c0 else None)
+        out['null_witness_failures'] = sum(na.get('witness_failures', 0) for na in na_rows)
     for mode in sorted({m for r in rows for m in r.get('conditions', {})}):
         cs = [(r, r['conditions'][mode].get('choice_tree') or {}) for r in rows
               if mode in r.get('conditions', {})]

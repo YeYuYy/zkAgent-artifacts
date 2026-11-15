@@ -1,0 +1,362 @@
+"""Runtime attention-tolerance patch for vLLM (pinned 0.25.0, V1 engine).
+
+zkAgent's attention normalizer accepts any committed row mass in [theta - eps,
+theta + eps]; choosing mass Theta_row instead of the canonical theta scales the
+row's attention output by g = theta / Theta_row in 1 +/- rho with
+rho = eps/theta = 7088/2^20 ~= 0.676% (the E1b-attn "two-pole" band model — a
+documented first-order subset of the admissible set).  Scaling the attention
+output is exactly the row-mass choice: o = (sum_i m_i v_i) / Theta_row =
+o_canonical * theta / Theta_row, and o_proj is linear so scaling before or
+after it is equivalent.
+
+This module monkeypatches Qwen3Attention.forward / Qwen2Attention.forward /
+LlamaAttention.forward (R1-Distill-Llama-8B, Llama-3.1 base — same
+next-style body as Qwen2 minus qk-norm) so
+that every attention output row computed in the CURRENT forward batch is
+scaled per (layer, head) by (1 + rho * sign).  Rows already in the prefix
+cache are never recomputed, so each row's perturbation is frozen at the time
+the row is computed — precisely a per-row, independently admissible zeta
+choice; canonical rows are the sign=0 choice.  The sign matrix lives in ONE
+pre-allocated CUDA buffer that is updated in place, so decode CUDA graphs
+captured at engine init (which replay the broadcast multiply against the
+buffer's fixed address) stay valid across config changes; the multiply always
+executes (zeros = canonical) to keep the captured graph branch-free.
+
+IMPORTANT: install() must run BEFORE LLM(...) construction — vLLM captures
+CUDA graphs during engine init, and a patch installed afterwards would never
+take effect on graphed decode steps.
+
+Public API:
+    install(rho=RHO)            patch the classes (idempotent)
+    set_signs(matrix)           matrix: [L, H] {−1,0,+1} (numpy/list/tensor);
+                                copied in place; None -> all zeros (canonical)
+    signs()                     current matrix as an [L, H] int tensor
+    clear()                     restore original forwards
+"""
+import inspect
+import re
+
+import numpy as np
+
+RHO = 7088 / (1 << 20)
+
+_SIGNED = {}
+
+
+def _next_style(orig):
+    """True iff forward has the vLLM "next" signature (positions, hidden_states).
+    LlamaAttention in vLLM 0.11.0 and 0.33.0 both match; a future change to a
+    different signature must fail loudly, not silently mis-patch."""
+    params = set(inspect.signature(orig).parameters) - {'self'}
+    return params == {'positions', 'hidden_states'}
+
+
+def _layer_index(mod):
+    """model.layers.<N>.self_attn.* -> N, cached on the module instance."""
+    li = getattr(mod, '_slack_layer_idx', None)
+    if li is not None:
+        return li
+    prefix = getattr(getattr(mod, 'o_proj', None), 'prefix', '') or \
+        getattr(getattr(mod, 'attn', None), 'prefix', '') or ''
+    m = re.search(r'layers\.(\d+)\.', prefix)
+    li = int(m.group(1)) if m else -1
+    mod._slack_layer_idx = li
+    return li
+
+
+def _mk_forward_next(orig, num_heads_attr='num_heads'):
+    """Qwen3NextAttention (Qwen3.5 full-attention layers): identical insertion
+    point — scale the attention output rows between self.attn() and the
+    output gate.  Linear-attention (GDN) layers have no softmax row
+    normalization and are deliberately untouched."""
+    def forward(self, positions, hidden_states):
+        import torch
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v, gate = self._project_qkv_gate(qkv, positions)
+        attn_output = self.attn(q, k, v)
+        attn_output = _slack_scale_rows(self, attn_output, positions)
+        if gate is not None:
+            attn_output = attn_output * torch.sigmoid(gate)
+        output, _ = self.o_proj(attn_output)
+        return output
+    return forward
+
+
+def _mk_layer_init(orig):
+    """Wrap Qwen2/3DecoderLayer.__init__: resolve the layer index from its
+    prefix and pin the shared sign buffer on the attention submodule AT
+    CONSTRUCTION — before torch.compile traces anything — so the traced
+    forward only reads an int attribute and a module tensor attribute (lifted
+    as a graph input; in-place set_signs updates stay visible)."""
+    def init(self, *args, prefix='', **kw):
+        orig(self, *args, prefix=prefix, **kw)
+        try:
+            li = int(prefix.split('.')[2])
+        except (IndexError, ValueError):
+            li = -1
+        sa = getattr(self, 'self_attn', None)
+        buf = _SIGNED.get('buffer')
+        if sa is not None and buf is not None:
+            object.__setattr__(sa, '_slack_layer_idx', li)
+            object.__setattr__(sa, '_slack_signs', buf)
+    return init
+
+
+def _mk_forward(orig, num_heads_attr='num_heads'):
+    def forward(self, positions, hidden_states):
+        import torch
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if getattr(self, 'q_norm', None) is not None:
+            # Qwen3 qk-norm path
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                               self.head_dim)
+            q = self.q_norm(q_by_head).view(q.shape)
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                               self.head_dim)
+            k = self.k_norm(k_by_head).view(k.shape)
+        q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v)
+        attn_output = _slack_scale_rows(self, attn_output, positions)
+        output, _ = self.o_proj(attn_output)
+        return output
+    return forward
+
+
+def _slack_scale_rows(mod, attn_output, positions):
+    """Scale attention output rows per (layer, head, position).
+
+    The sign buffer is [L, H, P]; rows are gathered at each token's absolute
+    position, so one forward can carry DIFFERENT sign matrices per row (the
+    per-position relaxation).  A 2-D set_signs() broadcast-fills every
+    position, reproducing the original row-uniform behaviour.  Returns the
+    tensor unchanged when no signs are set (bitwise identity)."""
+    import torch
+    signs = getattr(mod, '_slack_signs', None)
+    if signs is None:
+        signs = _SIGNED.get('buffer')
+    li = getattr(mod, '_slack_layer_idx', None)
+    if li is None:
+        li = _layer_index(mod)
+    if signs is None or not (0 <= li < signs.shape[0]):
+        return attn_output
+    h = getattr(mod, 'num_heads')
+    if h > signs.shape[1]:
+        return attn_output
+    pos = positions
+    if pos.dim() > 1:
+        pos = pos.reshape(-1)
+    if pos.numel() != attn_output.shape[0]:
+        # mrope/other layouts: fall back to row-uniform slice 0
+        col = signs[li, :h, 0]
+    else:
+        col = signs[li, :h].index_select(1, pos.clamp(0, signs.shape[2] - 1))  # [H,T]
+        col = col.t()  # [T,H]
+    scale = 1.0 + _SIGNED['rho'] * col.to(dtype=attn_output.dtype,
+                                           device=attn_output.device)
+    ao = attn_output.view(attn_output.shape[0], h, mod.head_dim)
+    ao = ao * scale.view(attn_output.shape[0], h, 1)
+    return ao.view(attn_output.shape[0], h * mod.head_dim)
+
+
+def _alloc(rho=RHO, num_layers=64, num_heads=64, max_positions=16384, device='cuda'):
+    import torch
+    _SIGNED.update(rho=float(rho), installed=True,
+                   buffer=torch.zeros(num_layers, num_heads, max_positions,
+                                      dtype=torch.float32, device=device))
+    return _SIGNED['buffer']
+
+
+def install(rho=RHO, num_layers=64, num_heads=64, max_positions=16384, device='cuda'):
+    """Patch Qwen2/Qwen3/Llama attention forwards and pre-allocate the sign buffer.
+
+    Must be called before vllm.LLM construction.  vLLM V1 spawns EngineCore in
+    a SUBPROCESS by default — the model would run where this patch does not
+    exist — so force the in-process engine here (checked at LLM init, before
+    any vllm import is required).  The buffer is allocated outside any
+    CUDA-graph capture pool; set_signs() updates it in place so captured
+    decode graphs observe new sign matrices without re-capture.
+    """
+    import os
+    os.environ['VLLM_ENABLE_V1_MULTIPROCESSING'] = '0'
+    import torch
+    from vllm.model_executor.models import qwen2, qwen3
+    if _SIGNED.get('installed'):
+        return
+    try:
+        from vllm.model_executor.models import llama
+    except ImportError:
+        llama = None
+    lla = getattr(llama, 'LlamaAttention', None) if llama else None
+    if lla is not None and not _next_style(lla.forward):
+        # Refuse before any state is allocated: a silently mis-patched forward
+        # would corrupt every campaign number.
+        raise RuntimeError(
+            'LlamaAttention.forward has unexpected signature '
+            f'{inspect.signature(lla.forward)}; only the vLLM next style '
+            'forward(self, positions, hidden_states) is supported '
+            '(verified against vLLM 0.11.0 and 0.33.0)')
+    _alloc(rho=rho, num_layers=num_layers, num_heads=num_heads,
+           max_positions=max_positions, device=device)
+    for mod, cls in ((qwen2, 'Qwen2Attention'), (qwen3, 'Qwen3Attention')):
+        cls_obj = getattr(mod, cls, None)
+        if cls_obj is None:
+            continue
+        _SIGNED.setdefault('orig', {})[cls] = cls_obj.forward
+        cls_obj.forward = _mk_forward(cls_obj.forward)
+    if lla is not None:
+        # LlamaAttention's next-style body is the Qwen2 body minus qk-norm,
+        # which _mk_forward already guards with getattr — reuse it verbatim.
+        _SIGNED.setdefault('orig', {})['LlamaAttention'] = lla.forward
+        lla.forward = _mk_forward(lla.forward)
+    try:
+        from vllm.model_executor.models import qwen3_next
+    except ImportError:
+        qwen3_next = None
+    nxt = getattr(qwen3_next, 'Qwen3NextAttention', None) if qwen3_next else None
+    if nxt is not None:
+        _SIGNED.setdefault('orig', {})[nxt] = nxt.forward
+        nxt.forward = _mk_forward_next(nxt.forward)
+    for mod, cls in ((qwen2, 'Qwen2DecoderLayer'), (qwen3, 'Qwen3DecoderLayer')):
+        cls_obj = getattr(mod, cls, None)
+        if cls_obj is None:
+            continue
+        _SIGNED.setdefault('orig_init', {})[cls] = cls_obj.__init__
+        cls_obj.__init__ = _mk_layer_init(cls_obj.__init__)
+    ldl = getattr(llama, 'LlamaDecoderLayer', None) if llama else None
+    if ldl is not None:
+        _SIGNED.setdefault('orig_init', {})['LlamaDecoderLayer'] = ldl.__init__
+        ldl.__init__ = _mk_layer_init(ldl.__init__)
+    try:
+        from vllm.model_executor.models import qwen3_5
+    except ImportError:  # vllm < Qwen3.5 support
+        qwen3_5 = None
+    q35 = getattr(qwen3_5, 'Qwen3_5DecoderLayer', None) if qwen3_5 else None
+    if q35 is not None:
+        _SIGNED.setdefault('orig_init', {})[q35] = q35.__init__
+        q35.__init__ = _mk_layer_init(q35.__init__)
+    return _SIGNED['buffer']
+
+
+def set_signs(matrix, positions=None):
+    """Write a {−1,0,+1}^{L×H} matrix into the live [L,H,P] buffer.
+
+    positions=None  -> broadcast to every position (row-uniform, the original
+                       behaviour);
+    positions=[p]   -> active only at the given absolute position(s), every
+                       other position canonical (the per-position relaxation).
+    None/zero matrix -> all canonical.  Returns the buffer."""
+    import torch
+    buf = _SIGNED.get('buffer')
+    if buf is None:
+        raise RuntimeError('install() first')
+    buf.zero_()
+    if matrix is None:
+        return buf
+    t = torch.as_tensor(np.asarray(matrix, dtype=np.float32))
+    nl, nh = min(t.shape[0], buf.shape[0]), min(t.shape[1], buf.shape[1])
+    core = torch.zeros(buf.shape[0], buf.shape[1], dtype=torch.float32)
+    core[:nl, :nh] = t[:nl, :nh]
+    if positions is None:
+        buf.copy_(core.unsqueeze(2).expand_as(buf))
+    else:
+        idx = torch.as_tensor(list(positions), dtype=torch.long)
+        for p in idx.tolist():
+            buf[:, :, min(p, buf.shape[2] - 1)] = core.to(buf.device)
+    return buf
+
+
+def _attention_classes():
+    """All patched vLLM attention classes present in this install (Qwen2, Qwen3,
+    Llama).  Used by _find_model/attach so any supported model family counts."""
+    from vllm.model_executor.models import qwen2, qwen3
+    classes = [qwen2.Qwen2Attention, qwen3.Qwen3Attention]
+    try:
+        from vllm.model_executor.models import llama
+        classes.append(llama.LlamaAttention)
+    except (ImportError, AttributeError):
+        pass
+    return tuple(classes)
+
+
+def _find_model(obj, depth=0, seen=None):
+    """Bounded BFS over the engine object graph for the wrapped nn.Module."""
+    import torch.nn as nn
+    if depth > 4 or obj is None or isinstance(obj, (str, bytes, int, float, bool)):
+        return None
+    seen = seen if seen is not None else set()
+    if id(obj) in seen:
+        return None
+    seen.add(id(obj))
+    if isinstance(obj, nn.Module):
+        has_attn = any(isinstance(m, _attention_classes()) for m in obj.modules())
+        if has_attn:
+            return obj
+    kids = []
+    if isinstance(obj, dict):
+        kids = list(obj.values())
+    elif isinstance(obj, (list, tuple, set)):
+        kids = list(obj)
+    else:
+        kids = [v for k, v in vars(obj).items()
+                if not k.startswith('_') or k in
+                ('_engine_core', 'engine_core', 'model_executor', 'driver_worker',
+                 'model_runner', 'model')] if hasattr(obj, '__dict__') else []
+        kids += [getattr(obj, k, None) for k in
+                 ('engine_core', 'model_executor', 'driver_worker', 'model_runner',
+                  'model') if hasattr(obj, k)]
+    for k in kids[:64]:
+        found = _find_model(k, depth + 1, seen)
+        if found is not None:
+            return found
+    return None
+
+
+def attach(llm):
+    """Point every attention module's `_slack_signs` at the shared buffer.
+
+    torch.compile lifts module tensor attributes as graph inputs (identity
+    guard), so compiled/captured graphs observe in-place set_signs() updates;
+    a global-dict lookup can be constant-specialised to the buffer's initial
+    zeros.  Call after LLM construction; harmless before any generate.
+    """
+    buf = _SIGNED.get('buffer')
+    if buf is None:
+        raise RuntimeError('install() first')
+    model = _find_model(llm)
+    if model is None:
+        return 0
+    n = 0
+    for mod in model.modules():
+        if isinstance(mod, _attention_classes()):
+            object.__setattr__(mod, '_slack_signs', buf)
+            n += 1
+    return n
+
+
+def signs():
+    import torch
+    b = _SIGNED['buffer'].detach().cpu()
+    return b[:, :, 0].to(torch.int32) if b.dim() == 3 else b.to(torch.int32)
+
+
+def clear():
+    from vllm.model_executor.models import qwen2, qwen3
+    try:
+        from vllm.model_executor.models import llama
+    except ImportError:
+        llama = None
+    for mod, cls in ((qwen2, 'Qwen2Attention'), (qwen3, 'Qwen3Attention'),
+                     (llama, 'LlamaAttention')):
+        cls_obj = getattr(mod, cls, None) if mod is not None else None
+        orig = _SIGNED.get('orig', {}).get(cls)
+        if cls_obj is not None and orig is not None:
+            cls_obj.forward = orig
+    for mod, cls in ((qwen2, 'Qwen2DecoderLayer'), (qwen3, 'Qwen3DecoderLayer'),
+                     (llama, 'LlamaDecoderLayer')):
+        cls_obj = getattr(mod, cls, None) if mod is not None else None
+        orig = _SIGNED.get('orig_init', {}).get(cls)
+        if cls_obj is not None and orig is not None:
+            cls_obj.__init__ = orig
+    _SIGNED.pop('buffer', None)
+    _SIGNED.pop('installed', None)
