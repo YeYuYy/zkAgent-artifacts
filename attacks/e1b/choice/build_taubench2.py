@@ -1452,7 +1452,10 @@ def assemble(domain, idx, task, built):
                 f'records (below). {multi}'
                 f'Choose the single correct next action.\n\n{context}\n\n'
                 f'Next agent action candidates:\n'
-                + '\n'.join(f'{o["label"]}. {o["text"]}' for o in options))
+                + '\n'.join(f'{o["label"]}. {o["text"]}' for o in options)
+                + f'\n\nWhich action should the agent take next to serve this customer? '
+                  f'Reason briefly, then put your final choice in \\boxed{{1}}, \\boxed{{2}}, '
+                  f'\\boxed{{3}}, or \\boxed{{4}}.')
     return {
         'id': f'tb2-{"air" if domain == "airline" else "ret"}-{idx}',
         'domain': f'taubench2-{domain}',
