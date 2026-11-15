@@ -123,6 +123,26 @@
   (对照 Qwen3-8B 75.9/61.5%):**攻击面随尺寸单调收缩,代际 > 尺寸**;null 也随尺寸
   收缩(19→4%)但被瞄准时仍 50–80% 可翻。`0fdf04b`
 
+## 阶段 11(11-16):full-scale 设计 v1 的 P0 前置
+
+- **要求**(`reports/Next-step-full-scale.md` §9 P0):τ-bench 重建(§7)+ 协议定稿(§8)
+  + LlamaAttention 适配 + 删误提交二进制 + thinking 成本试跑。
+- **达成(二进制)**:`validate_simulation` 移出 git 追踪。`956d7bc`
+- **达成(τ-bench v2)**:数据库渲染进 prompt(订单逐 item 属性、完整变体表、支付
+  方式余额、预订、逐舱位航班表、policy 段),删模拟器元指令;程序化 (a) gold-unique
+  (否定感知属性钉定/偏好链/多写任务先模拟先前写)+ (b) directed 差异 token 在
+  context。产出 **airline 15 + retail 37** 题,自动校验 0 问题;丢弃均为真实歧义
+  (funnel 已报)。`18046c7`
+- **达成(协议)**:beam8/abs/40000/4096 默认;fp32 + allow_tf32=False;**新 null
+  协议 null-k=5**(K 次 canonical 只换币 salt,稳定子集 q̂=0 记录);Wilson CI +
+  配对 bootstrap + 稳定性小表;Mind2Web 全量 409→**354** 可用题;SUMMARY bf16 措辞
+  修正。`3f11a99`
+- **达成(LlamaAttention)**:vLLM patch 支持 LlamaAttention(0.33/0.11 均 next 式,
+  逐类签名守卫),stub 单测 9/9;真模型 GPU 冒烟待下载完成。
+- **进行中(thinking 试跑)**:H200 worker 已起,8B fp32+thinking × M2W-409 前 20 题
+  ×{any,directed} 已排队(同跑验证 null-k);32B 下载 ~56%,到位后补两卡试跑
+  (`launch.py --gpus`);外推判定待计时。详见 `reports/P0-fullscale-progress.md`。
+
 ---
 
 ## 一页对照表
@@ -140,3 +160,4 @@
 | 11-13 | 模拟忠实性 / τ-bench / bf16 一致性 | 模拟≡真 verifier;τ-bench 96.2/87.7%;bf16 不可模拟注意力 | `9d71967` `f93bd76` |
 | 11-14 | fp32 重测 + Phase A | attn-only 41.3%(fp32);Qwen3.5 可达集 ~3× 宽 | `7fb9fe4` `e0e9bfb` |
 | 11-15 | 尺寸阶梯 ASR | 82→81→66% 单调收缩;代际>尺寸 | `0fdf04b` |
+| 11-16 | P0(full-scale v1) | τ-bench v2(15+37,eligibility 程序化);协议定稿(null-k=5/fp32/预算统一);Llama patch;thinking 试跑进行 | `956d7bc` `18046c7` `3f11a99` |
