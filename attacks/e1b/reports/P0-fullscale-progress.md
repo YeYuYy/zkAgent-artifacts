@@ -183,3 +183,8 @@ max ≈12k 字符)。
 ⚠️ worker1 队列里仍有**前一会话排的两个 2048 directed 臂**(ret/air-directed,
 排在 4096 臂之前,约多占 ~6–8 h)——按闸门协议"只迭代该轴"应跳过,但它们是
 既有队列项,留待人工决定删除或放行。
+**增补(决策落定)**:airline any@2048 完成:parse **20%**(3/15),12 个未解析
+项同样全部 capped——预算截断在 airline 更严重。人工决定 **skip**:pending 的
+air-directed@2048 已删除;ret-directed@2048 当时已在跑且队列机制无单作业取消
+(STOP 会杀整个 worker),放行至跑完(~3 h)作 directed 臂的 2048 对照,随后
+四条 4096 臂依序开跑。
