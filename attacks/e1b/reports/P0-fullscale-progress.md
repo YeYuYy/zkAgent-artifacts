@@ -110,3 +110,53 @@ attach() 为 Llama 模块预分配符号缓冲;clear() 完整还原;Qwen 路径�
 
 Qwen3-32B(pinned `9216db57`)→ R1-Distill-Llama-8B(`6a6f4aa4`)→ Qwen3-4B → Qwen3-14B,
 全部哈希校验(`download_model.py` 新增 pinned revisions)。**五个模型全部就位。**
+
+## 先导集首轮复核 + 三项修复(2026-11-17)
+
+**复核结论**(闸门点按时到;choice_report 口径,c₀-eligible):
+
+| 臂 | n | parse | elig-c₀ | ASR | null_any | ASR−null [CI] | s/题 | 闸门 |
+|---|---|---|---|---|---|---|---|---|
+| 8B M2W any | 120 | 96.7% | 115 | 0.826 | 0.143 | **+0.683 [0.591, 0.770]** | 188 | 1–4 全过 |
+| 8B M2W directed | 120 | 96.7% | 111 | 0.649 | 0.132 | **+0.517 [0.420, 0.611]** | 239 | 1–4 全过 |
+| 32B M2W any(p1-table1 续用) | 32 | 100% | 32 | 0.750 | 0.181 | **+0.569 [0.375, 0.744]** | 368 | 过 |
+
+null witness 0 失败;成本均在试跑外推之内(8B any 甚至更快)。τ-bench 四臂
+worker1 在途(ret-any 运行中 + 3 臂排队),闸门 5 待判。
+
+**问题与修复**:
+
+1. **32B directed 6h 超时**(16/32 题被杀,returncode −15):directed 搜索在
+   32B 上 median 823.6 s/题 = 试跑外推(8.9 min)的 **+54%**,且 6h 上限本身
+   低于 16 题 × 824 s + 引擎启动,注定跑不完。修复:同 argv 重排队
+   (config 一致 ⇒ resume 跳过已完成 16 题),timeout 21600 → **86400**。
+   注意闸门 4 的成本单项在 32B-directed 上按原口径已算未达;全量排产时
+   32B 行按实测 824 s/题重算预算。
+2. **Llama GPU smoke 两次失败,两个独立根因**:
+   a. 引擎初始化崩溃 `_ModelInfo object has no attribute
+      supports_kv_cache_grouping`:vLLM 0.33 registry 对新架构在**子进程**
+      (`sys.executable -m vllm.model_executor.models.registry`)内省模型类,
+      子进程继承环境变量但不继承进程内 sys.path 注入;旧 smoke 只在进程内插
+      site-dir ⇒ 子进程解析到 vllm-env 自带的 vLLM 0.11,`_ModelInfo` 按 0.11
+      字段构造,pickle 回父进程按 0.33 类反序列化 ⇒ 字段缺失(asdict 保存缓存
+      与 kv-cache-grouping 属性两处爆)。choice 作业从未踩中:argv 里一直带
+      `env PYTHONPATH=py312-vllm35`。修复:smoke 自身同时设
+      `os.environ['PYTHONPATH']`,作业 argv 也带上(与 choice 作业一致)。
+   b. `attach() found no Llama attention modules`:attach 的 BFS 深度上限 4
+      走不到 0.33 InprocClient 引擎图里的模型
+      (llm→llm_engine→engine_core→model_executor→driver_worker→worker→
+      model_runner→model 共 7 跳)——Qwen 作业同样 attached=0 且一直正常,
+      因为 `_mk_layer_init` 在**构造时**就把 buffer 钉到每个 attention 模块,
+      attach 只是兜底重绑。修复:smoke v2 改功能面判定——无界 BFS 找到模型、
+      校验 pinned == 模块数 且 layer_idx == {0..L-1}、零符号恢复 bitwise
+      一致、全 −1 符号改变 top-k logprobs(附 max |Δlogprob|)。smoke 移入
+      `experiments/llama_attn_smoke.py`(镜像 artifacts `attacks/e1b/choice/`),
+      去掉对旧快照路径的硬编码。已重排队(worker2,32B 续跑之后),结果待出。
+3. **A/B batch32/max-seqs1024 从未入队**(先导集清单第 4 条):补排
+   8B M2W any n=120 同设定仅 batch/max-seqs 不同,基线 = 已完成 batch16 臂
+   (median 188.2 s/题,chunk 27213 s)。判据不变:≥1.2× ⇒ 后续全量改用。
+   注意该臂跑在 worker2(H200 同型号),与基线(worker1)跨节点比较,
+   阈值判定时留意 ~数% 级节点差。
+
+**worker2 队列**:32B directed 续跑(24h cap)→ llama smoke v2 → A/B。
+worker1 继续 τ-bench 四臂。五臂齐后按 §过闸标准 出全量/回退决定。

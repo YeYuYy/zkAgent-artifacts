@@ -146,6 +146,23 @@
   五个模型(4B/8B/14B/32B、R1-Llama-8B)全部下载校验完毕。**P1 表 1 已开跑**
   (worker2=32B 整行,worker1=14B 行,最贵优先)。详见 `reports/P0-fullscale-progress.md`。
 
+## 阶段 12(11-17):先导集首轮复核 + 基建修复
+
+- **要求**:先导集约 30h 闸门点复核(§P1 改为先导集)。
+- **达成(复核)**:8B M2W 双臂 **闸门 1–4 全过**(parse 96.7%、eligible-c₀
+  115/111、ASR−null any **+0.683 [0.591,0.770]** / directed **+0.517 [0.420,0.611]**,
+  null witness 0 失败,median 188/239 s/题 ≤ 外推);32B any(p1-table1 续用)
+  **+0.569 [0.375,0.744]**;τ-bench 四臂 worker1 在途(闸门 5 待判)。
+- **修复(三项)**:① 32B directed 6h 超时(16/32 题;directed 在 32B 上 824 s/题
+  = 外推 +54%,为 any 的 2.2×)⇒ 同 argv 重排、timeout 86400 resume 续跑;
+  ② Llama smoke 两根因:vLLM 0.33 registry **子进程**内省只吃环境 PYTHONPATH
+  (0.11 的 `_ModelInfo` pickle 回 0.33 类 ⇒ 引擎崩)+ attach 深度 4 BFS 走不到
+  0.33 引擎图的模型(构造期钉 buffer 才是生效路径,attached=0 属预期)⇒
+  smoke v2 移入 `experiments/` 并改功能面判定(pinned==L、layer_idx 连续、
+  零符号 bitwise 恢复、全 −1 改变 top-k logprobs);③ A/B batch32 从未入队 ⇒
+  补排(8B any n=120,batch32/max-seqs1024)。详见
+  `reports/P0-fullscale-progress.md` §2026-11-17。
+
 ---
 
 ## 一页对照表
@@ -164,3 +181,4 @@
 | 11-14 | fp32 重测 + Phase A | attn-only 41.3%(fp32);Qwen3.5 可达集 ~3× 宽 | `7fb9fe4` `e0e9bfb` |
 | 11-15 | 尺寸阶梯 ASR | 82→81→66% 单调收缩;代际>尺寸 | `0fdf04b` |
 | 11-16 | P0(full-scale v1) | τ-bench v2(15+37,eligibility 程序化);协议定稿(null-k=5/fp32/预算统一);Llama patch;thinking 试跑判定保留;P1 表 1 开跑 | `956d7bc` `18046c7` `3f11a99` `9fe58c9` `99a0c1a` |
+| 11-17 | 先导集复核 + 修复 | 8B 双臂过闸 1–4(ASR−null +0.68/+0.52);32B-directed 超时重排(24h);Llama smoke 双根因修复(env PYTHONPATH / attach 判定);A/B 补排 | `c6dac77` `3c00b8e` |
