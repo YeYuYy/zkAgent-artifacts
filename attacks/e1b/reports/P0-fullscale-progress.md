@@ -82,12 +82,29 @@ attach() 为 Llama 模块预分配符号缓冲;clear() 完整还原;Qwen 路径�
 - 新 null-k 协议全链路在 GPU 验证通过(逐 token witness,0 失败);发现并修复
   null_dir 统计把 c₀==directed 的题计进 directed 的口径 bug(`9fe58c9`)。
 
-## 排队中的后续(P1 起点)
+## P1 改为先导集(pilot)再全量(2026-11-16 增补)
 
-判定已定,按"最贵的排前面"开跑表 1(worker2=2×H200:Qwen3-32B 整行;worker1=1×H200:
-14B → 8B 续跑(试跑 20 题自动复用)→ 4B;全部 fp32 + thinking + null-k=5,预算
-beam8/abs/40000/4096)。τ-bench v2 首跑 smoke(20 题 retail)进行中——通过后再上
-全量;R1-Llama-8B attention patch 的 GPU 冒烟排在 smoke 之后。
+**理由**:本轮同时换了四样东西——新 eligible(c₀ 口径,不再按稳定性过滤)、新 null
+(K=5 换币 canonical)、主指标改为 ASR−null(配对 bootstrap)、fp32+thinking 运行设定
+——全部只在 n=20 上跑过。当天两次 smoke 就抓出了 τ-bench v2 缺答案格式指令
+(0/16 解析)和 null_dir 分母口径 bug;直接投一周量级的全量跑,等于把这类缺陷烧进
+几天的算力。改为先导集校准,过闸门再全量。
+
+**先导集内容**(全部 thinking on、fp32、beam8/abs/40000/4096、null-k=5):
+- **8B × M2W n=120 × {any, directed}**(worker1;前 120 题与 v1 的 150 题重合 →
+  同一批题上新旧口径直接可比,即"用新指标更新旧结果"的校准点);
+- **8B × τ-bench v2 全量(52:retail 37 + airline 15)× {any, directed}**(worker1);
+- **32B × M2W n=32 × {any, directed}**(worker2;any 直接续用已在跑的 6h 作业产物);
+- 顺带:batch32/max-seqs1024 的 A/B(worker1,排在 14B 原位置)。
+
+**过闸标准**(约 30 小时后复核):
+1. honest 解析率 ≥95%,eligible_c0 ≥70%(逐数据集;不达标先查原因再谈全量);
+2. null 合理性:null_any 明显低于 ASR、witness 0 失败;
+3. 检验功效:n=120 上 ASR−null 配对 bootstrap CI 不含 0(主指标设计成立);
+4. 成本:每题耗时 ≤ 试跑外推 +30%(否则按预案整表回退 thinking off);
+5. τ-bench v2 eligible 率正常、directed 命中落在指定目标;
+6. A/B ≥1.2× 则后续作业全部改用 batch32/max-seqs1024。
+全过 ⇒ 同设定全量(354/52)排产;任一不过 ⇒ 只迭代该轴,不动其他。
 
 ## 模型下载(后台链)
 
