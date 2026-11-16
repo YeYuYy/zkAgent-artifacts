@@ -162,6 +162,11 @@
   零符号 bitwise 恢复、全 −1 改变 top-k logprobs);③ A/B batch32 从未入队 ⇒
   补排(8B any n=120,batch32/max-seqs1024)。详见
   `reports/P0-fullscale-progress.md` §2026-11-17。
+- **同日落定**:32B-directed 续跑 **COMPLETE**(2.46 h/16 题,chunk-1 median
+  683 s/题,全腿 blended ~754 s/题 = 外推 +41%;directed 11/20 ⇒ −null 后
+  **+0.45**,witness 0 失败);**Llama smoke v2 PASS**(32/32 模块构造期 pinned、
+  layer_idx 0..31、零符号 bitwise 恢复、全 −1 符号 max |Δlogprob| 0.152)⇒
+  **P0 项 4 完成**,R1-Llama-8B attention 臂解封;A/B batch32 转运行中。
 
 ---
 

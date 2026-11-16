@@ -131,7 +131,10 @@ worker1 在途(ret-any 运行中 + 3 臂排队),闸门 5 待判。
    低于 16 题 × 824 s + 引擎启动,注定跑不完。修复:同 argv 重排队
    (config 一致 ⇒ resume 跳过已完成 16 题),timeout 21600 → **86400**。
    注意闸门 4 的成本单项在 32B-directed 上按原口径已算未达;全量排产时
-   32B 行按实测 824 s/题重算预算。
+   32B 行按实测 824 s/题重算预算。**续跑完成(11-17,2.46 h / 16 题,chunk-1
+   median 683 s/题,全腿 blended ~754 s/题 = 外推 +41%)**:n=32 全量,
+   parse 100%,eligible 24,directed 11/20 命中(asr_dir 0.55,−null_dir 0.100
+   ⇒ **+0.45**),null_any 0.188,witness 0 失败,COMPLETE 落盘。
 2. **Llama GPU smoke 两次失败,两个独立根因**:
    a. 引擎初始化崩溃 `_ModelInfo object has no attribute
       supports_kv_cache_grouping`:vLLM 0.33 registry 对新架构在**子进程**
@@ -151,12 +154,15 @@ worker1 在途(ret-any 运行中 + 3 臂排队),闸门 5 待判。
       校验 pinned == 模块数 且 layer_idx == {0..L-1}、零符号恢复 bitwise
       一致、全 −1 符号改变 top-k logprobs(附 max |Δlogprob|)。smoke 移入
       `experiments/llama_attn_smoke.py`(镜像 artifacts `attacks/e1b/choice/`),
-      去掉对旧快照路径的硬编码。已重排队(worker2,32B 续跑之后),结果待出。
+      去掉对旧快照路径的硬编码。**已跑通(11-17)**:attn_modules 32/32 全为
+      `LlamaAttention` 且构造期全 pinned,layer_idx 恰为 0..31(attach_reported=0
+      如预期);零符号恢复 bitwise 一致;全 −1 符号 max |Δlogprob| = 0.152。
+      ⇒ **P0 项 4(LlamaAttention GPU 验证)完成**,R1-Llama-8B attention 臂解封。
 3. **A/B batch32/max-seqs1024 从未入队**(先导集清单第 4 条):补排
    8B M2W any n=120 同设定仅 batch/max-seqs 不同,基线 = 已完成 batch16 臂
    (median 188.2 s/题,chunk 27213 s)。判据不变:≥1.2× ⇒ 后续全量改用。
    注意该臂跑在 worker2(H200 同型号),与基线(worker1)跨节点比较,
    阈值判定时留意 ~数% 级节点差。
 
-**worker2 队列**:32B directed 续跑(24h cap)→ llama smoke v2 → A/B。
+**worker2 队列**:~~32B directed 续跑~~ ✅ → ~~llama smoke v2~~ ✅ → **A/B(运行中)**。
 worker1 继续 τ-bench 四臂。五臂齐后按 §过闸标准 出全量/回退决定。
