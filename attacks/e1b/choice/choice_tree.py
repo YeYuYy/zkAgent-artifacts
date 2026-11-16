@@ -418,6 +418,8 @@ def main():
                    help='walk the plain sample and count tokens outside witnesses(H)')
     p.add_argument('--batch', type=int, default=64)
     p.add_argument('--max-seqs', type=int, default=512)
+    p.add_argument('--tensor-parallel', type=int, default=1,
+                   help='vLLM tensor-parallel size (2 for Qwen3-32B fp32)')
     p.add_argument('--enforce-eager', action='store_true',
                    help='disable CUDA graphs/compile (R1 + long WebShop-natural '
                         'prompts hit a flash-attention illegal-memory-access '
@@ -895,7 +897,10 @@ def main():
             tmp.write_text(json.dumps(row)); tmp.replace(target)
         all_rows = [json.loads(f.read_text()) for f in (a.out / 'items').glob('*.json')]
         s = choice_summary(all_rows)
-        s['phase_seconds'] = round(time.time() - t0, 1)
+        s['chunk_seconds'] = round(time.time() - t0, 1)
+        # engine-time breakdown per phase (honest sampling / greedy probes /
+        # audits) so throughput tuning is data-driven, not guessed
+        s['engine_seconds'] = {k: round(v, 1) for k, v in engine.t.items()}
         (a.out / 'summary.json').write_text(json.dumps(s, indent=2))
         print(json.dumps(dict(chunk=start + len(chunk), total=len(items),
                               seconds=round(time.time() - t0, 1),
