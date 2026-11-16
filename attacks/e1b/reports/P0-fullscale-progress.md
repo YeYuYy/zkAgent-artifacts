@@ -166,3 +166,20 @@ worker1 在途(ret-any 运行中 + 3 臂排队),闸门 5 待判。
 
 **worker2 队列**:~~32B directed 续跑~~ ✅ → ~~llama smoke v2~~ ✅ → **A/B(运行中)**。
 worker1 继续 τ-bench 四臂。五臂齐后按 §过闸标准 出全量/回退决定。
+
+## 闸门 1 首个未达项:τ-bench retail @2048 解析率 64.9%(2026-11-17 夜,已定位+重排)
+
+tb2ret-any(n=37,thinking on,fp32/beam8)完成但 honest 解析率 **64.9% < 95%**、
+eligible_c0 54% —— 13 个未解析项**全部 `capped=True`**:Qwen3-8B 在 τ-bench v2
+的数据库渲染长 prompt 上,thinking 在 `--max-new 2048` 内走不完即被截断
+(未解析项尾部全是推理中态;已解析项 p50 3.5k / p90 6.5k 字符,上限≈8-9k)。
+**根因是提交参数沿用了 M2W 预算**:`E1b-choice-NEXT.md` 自己的 τ-bench 计划行
+就是 `--max-new 4096`。模型上下文(32k)与 KV 预算均有充分余量(retail prompt
+max ≈12k 字符)。
+
+处置:四臂以 `--max-new 4096 --max-steps 4400` 重排(out 目录 `-mx4096` 后缀,
+避开与旧目录的 mismatched-resume 守卫);2048 版保留为证据
+(`qwen3-8b-tb2ret-any-maxnew2048`;airline any@2048 在跑,留作出截断敏感度对照)。
+⚠️ worker1 队列里仍有**前一会话排的两个 2048 directed 臂**(ret/air-directed,
+排在 4096 臂之前,约多占 ~6–8 h)——按闸门协议"只迭代该轴"应跳过,但它们是
+既有队列项,留待人工决定删除或放行。

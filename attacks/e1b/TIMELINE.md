@@ -167,6 +167,10 @@
   **+0.45**,witness 0 失败);**Llama smoke v2 PASS**(32/32 模块构造期 pinned、
   layer_idx 0..31、零符号 bitwise 恢复、全 −1 符号 max |Δlogprob| 0.152)⇒
   **P0 项 4 完成**,R1-Llama-8B attention 臂解封;A/B batch32 转运行中。
+- **闸门 1 首个未达(同夜)**:tb2ret-any@2048 解析率 64.9%<95%,13 个未解析项
+  全部 capped——thinking 在 M2W 档的 2048 token 预算内走不完 τ-bench 长 prompt
+  (计划文本本就指定 τ-bench 用 4096)。四臂以 4096/4400 重排(`-mx4096`),
+  2048 版留证;worker1 队列余两个前会话的 2048 directed 臂待人工决定去留。
 
 ---
 
