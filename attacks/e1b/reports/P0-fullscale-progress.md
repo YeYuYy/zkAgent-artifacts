@@ -188,3 +188,12 @@ max ≈12k 字符)。
 air-directed@2048 已删除;ret-directed@2048 当时已在跑且队列机制无单作业取消
 (STOP 会杀整个 worker),放行至跑完(~3 h)作 directed 臂的 2048 对照,随后
 四条 4096 臂依序开跑。
+
+### A/B 判定(闸门 6):**不过 —— 全量维持 batch16/max-seqs512**(2026-11-18)
+
+batch32/max-seqs1024 臂(worker2,n=120,rc 0)median **213.8 s/题 vs 基线
+188.2 s/题 = 0.88×**(慢 12%;chunk 24604 s vs 27213 s)。跨节点(基线在
+worker1)数百分点级差异无法把 0.88 翻成 ≥1.2,判据明确不过。
+副产品:同题复算高度一致(parse 96.7% 持平、eligible 100/120、ASR-c₀ 0.850
+vs 0.826、null_any 0.134 vs 0.143、witness 0 失败)⇒ 协议跨节点/跨 batch
+设定可复现。后续全量作业保持默认 batch16/max-seqs512。
