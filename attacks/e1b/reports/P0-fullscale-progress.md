@@ -237,3 +237,38 @@ vs 0.826、null_any 0.134 vs 0.143、witness 0 失败)⇒ 协议跨节点/跨 ba
 同设定全量(表 1 M2W 354 × 5 模型 + 表 2 τ-bench v2 52 × {any,directed},
 attention 臂含 R1-Llama)可排产。** 两台 worker 现均空闲;32B-any 全量行
 (p1-table1,32/354,resume)待人工放行后可即刻续跑。
+
+## 先导集 v2(2026-11-18 增补):更正范围 —— 全矩阵小 n
+
+**用户更正**:先导集应为"**全部实验、只缩小题量**"——覆盖设计文档表 1+表 2 的
+每一个 cell(含 attention 臂与表 2 通用性模型),闸门照旧;而非只挑 8B/32B 的
+decode 角落(v1 先导集即前一会话所定范围)。以下为 v2 矩阵与缺口盘点。
+
+**Cell 结构**(按设计 §4):表 1 = Qwen3{4B,8B,14B,32B} × {M2W,τ-bench} ×
+攻击面{null,sample,attention,sample+attention} × 目标{any,directed,inflation};
+表 2 = Qwen3.5-9B(bf16,仅 decode)+ R1-Llama-8B(同表 1)。null 由 null-k=5
+协议内嵌;inflation 列由 free-r(计费)臂数据产出(report.py 已有口径)。
+
+**已完成(v1,锁定协议下)**:8B×M2W sample×{any,dir}(n=120)、8B×τ-bench
+sample×{any,dir}(全量)、32B×M2W sample×{any,dir}(n=32)——共 6 cell。
+
+**v2 待跑(小 n:M2W n=16、τ-bench n=12(retail 8+airline 4)、attn 臂 n=12)**:
+- decode/sample:5 模型(4B/14B/Q35/R1 双数据集 + 32B×τ-bench)× {any,dir} = 20 跑
+- free-r(计费/inflation):6 模型 × 2 数据集 = 12 跑(单目标)
+- attention(choice_tree_attn,{attn-only, attn+decode} × {any,dir}):5 模型
+  (4B/8B/14B/32B/R1)× 2 数据集 = 40 跑
+- 表 3 小样(thinking off,{8B,32B}×M2W×{any,dir})= 4 跑;表 5 小样(8B 推荐温度)= 1 跑
+- 表 4(M2W 全任务级)与 case study(τ-bench 环境执行)需独立数据/管线,暂列 v2 之外
+合计 ≈77 跑;估 ~160–220 作业时 ≈ 2.5–3.5 天墙钟(w1 单卡 + w2 双卡 TP)。
+
+**先决工程项(跑 attention 臂前)**:
+1. `choice_tree_attn.py` 移植 null-k=5 协议(choice_tree.py 为参照)——否则
+   attn 臂无法以 ASR−null 主指标报告;c₀-eligible 与 Wilson/配对 bootstrap
+   口径一并对齐(choice_report.py 兼容旧 JSON 的做法照搬)。
+2. attn 臂 τ-bench 预算 6144/6600、beam-score=abs、fp32、batch16 显式传参
+  (该 harness 默认值仍为 cum/bf16/max-new1024/batch8)。
+3. R1 全臂 `--enforce-eager`;Qwen3.5-9B `--dtype bfloat16`(仅 decode)。
+
+排产次序(贵/新优先):32B×τ-bench decode → 32B attn(M2W,TP2)→ R1 全臂
+(新家族+eager)→ 14B → 4B → Q35-9B → 表 3/5 小样。v1 六闸门结论对 v2 仍有效
+(协议未变,只是覆盖面补全);v2 各 cell 复用同一闸门判据。
