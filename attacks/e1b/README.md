@@ -86,6 +86,7 @@ attacks/e1b/
 |---|---|
 | `choice_data.py` | schema / prompt 构造 / loader / 解析(torch-free) |
 | `build_choice_data.py` | 从原始 CSV/JSON/parquet 构建 DailyDilemma / WebShop / Mind2Web / τ-bench choice 数据 |
+| `build_taubench2.py` | τ-bench v2 重建(§7):数据库渲染进 prompt + 程序化 eligibility(a/b)+ 多写任务先模拟先前写;产出 `taubench2-{airline,retail}-choice.jsonl` |
 | `choice_scoring.py` | choice 解析、null/ASR 汇总、AUC 工具 |
 | `choice_tree.py` | 主 runner:vLLM 批量 step-loop,exhaustive/beam/rollout × any/directed |
 | `choice_tree_hf.py` | HF eager + AttnSlack 的 attention 轴 runner |
@@ -113,7 +114,9 @@ attacks/e1b/
 |---|---|
 | `mind2web-choice-150.jsonl` | Mind2Web 决策轮(150,4 选 1,directed target) |
 | `webshop-choice-150-directed.jsonl` | WebShop 静态四选一(150,directed) |
-| `taubench-choice-119.jsonl` | τ-bench 高影响动作选择(119,directed = 代价最高干扰) |
+| `taubench-choice-119.jsonl` | τ-bench 高影响动作选择 v1(119,directed = 代价最高干扰;**retail ~73% directed 不可区分,已被 v2 取代**) |
+| `taubench2-{airline,retail}-choice.jsonl` | τ-bench v2(15+37,DB 渲染进 prompt,eligibility 程序化;funnel 见 `cache/next/taubench/taubench2-funnel.json`) |
+| `mind2web-choice-409.jsonl` | Mind2Web 全量(409 标注 → 354 可用;旧 150 为子集;在共享存储 `data/`) |
 | `E1b-choice-feasible-v2.jsonl` | E1b-choice 每题搜索规模(v2,spawn 修复后) |
 
 ## 测试

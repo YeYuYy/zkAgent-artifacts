@@ -123,6 +123,61 @@
   (对照 Qwen3-8B 75.9/61.5%):**攻击面随尺寸单调收缩,代际 > 尺寸**;null 也随尺寸
   收缩(19→4%)但被瞄准时仍 50–80% 可翻。`0fdf04b`
 
+## 阶段 11(11-16):full-scale 设计 v1 的 P0 前置
+
+- **要求**(`reports/Next-step-full-scale.md` §9 P0):τ-bench 重建(§7)+ 协议定稿(§8)
+  + LlamaAttention 适配 + 删误提交二进制 + thinking 成本试跑。
+- **达成(二进制)**:`validate_simulation` 移出 git 追踪。`956d7bc`
+- **达成(τ-bench v2)**:数据库渲染进 prompt(订单逐 item 属性、完整变体表、支付
+  方式余额、预订、逐舱位航班表、policy 段),删模拟器元指令;程序化 (a) gold-unique
+  (否定感知属性钉定/偏好链/多写任务先模拟先前写)+ (b) directed 差异 token 在
+  context。产出 **airline 15 + retail 37** 题,自动校验 0 问题;丢弃均为真实歧义
+  (funnel 已报)。`18046c7`
+- **达成(协议)**:beam8/abs/40000/4096 默认;fp32 + allow_tf32=False;**新 null
+  协议 null-k=5**(K 次 canonical 只换币 salt,稳定子集 q̂=0 记录);Wilson CI +
+  配对 bootstrap + 稳定性小表;Mind2Web 全量 409→**354** 可用题;SUMMARY bf16 措辞
+  修正。`3f11a99`
+- **达成(LlamaAttention)**:vLLM patch 支持 LlamaAttention(0.33/0.11 均 next 式,
+  逐类签名守卫),stub 单测 9/9;真模型 GPU 冒烟待下载完成。
+- **达成(thinking 试跑)**:实测 8B 4.4 min/题(1×H200)、32B 8.9 min/题(2×H200 TP,
+  `launch.py --gpus` + worker 多卡放宽);表 1+2 全量外推 ≈14 GPU-天 ≈ 4.7 天墙钟
+  (<1 周)⇒ **不回退,整表 thinking on**。试跑顺带:新 null-k 协议 GPU 全链路通过
+  (witness 0 失败);发现并修复 null_dir 把 c₀==directed 计入的口径 bug(`9fe58c9`)。
+  五个模型(4B/8B/14B/32B、R1-Llama-8B)全部下载校验完毕。**P1 表 1 已开跑**
+  (worker2=32B 整行,worker1=14B 行,最贵优先)。详见 `reports/P0-fullscale-progress.md`。
+
+## 阶段 12(11-17):先导集首轮复核 + 基建修复
+
+- **要求**:先导集约 30h 闸门点复核(§P1 改为先导集)。
+- **达成(复核)**:8B M2W 双臂 **闸门 1–4 全过**(parse 96.7%、eligible-c₀
+  115/111、ASR−null any **+0.683 [0.591,0.770]** / directed **+0.517 [0.420,0.611]**,
+  null witness 0 失败,median 188/239 s/题 ≤ 外推);32B any(p1-table1 续用)
+  **+0.569 [0.375,0.744]**;τ-bench 四臂 worker1 在途(闸门 5 待判)。
+- **修复(三项)**:① 32B directed 6h 超时(16/32 题;directed 在 32B 上 824 s/题
+  = 外推 +54%,为 any 的 2.2×)⇒ 同 argv 重排、timeout 86400 resume 续跑;
+  ② Llama smoke 两根因:vLLM 0.33 registry **子进程**内省只吃环境 PYTHONPATH
+  (0.11 的 `_ModelInfo` pickle 回 0.33 类 ⇒ 引擎崩)+ attach 深度 4 BFS 走不到
+  0.33 引擎图的模型(构造期钉 buffer 才是生效路径,attached=0 属预期)⇒
+  smoke v2 移入 `experiments/` 并改功能面判定(pinned==L、layer_idx 连续、
+  零符号 bitwise 恢复、全 −1 改变 top-k logprobs);③ A/B batch32 从未入队 ⇒
+  补排(8B any n=120,batch32/max-seqs1024)。详见
+  `reports/P0-fullscale-progress.md` §2026-11-17。
+- **同日落定**:32B-directed 续跑 **COMPLETE**(2.46 h/16 题,chunk-1 median
+  683 s/题,全腿 blended ~754 s/题 = 外推 +41%;directed 11/20 ⇒ −null 后
+  **+0.45**,witness 0 失败);**Llama smoke v2 PASS**(32/32 模块构造期 pinned、
+  layer_idx 0..31、零符号 bitwise 恢复、全 −1 符号 max |Δlogprob| 0.152)⇒
+  **P0 项 4 完成**,R1-Llama-8B attention 臂解封;A/B batch32 转运行中。
+- **闸门 1 首个未达(同夜)**:tb2ret-any@2048 解析率 64.9%<95%,13 个未解析项
+  全部 capped——thinking 在 M2W 档的 2048 token 预算内走不完 τ-bench 长 prompt
+  (计划文本本就指定 τ-bench 用 4096)。四臂以 4096/4400 重排(`-mx4096`),
+  2048 版留证;worker1 队列余两个前会话的 2048 directed 臂待人工决定去留。
+- **先导集收口(11-18)**:预算阶梯 2048→4096→6144 解析率 64.9/20% →
+  91.9/86.7% → **四臂全 100%**,τ-bench 统一锁定 **6144/6600**。6144 终值:
+  retail any ASR 0.645/null 0.135;retail directed **0.714**/0.006;airline any
+  0.846/0.086;airline directed **0.909**/0.031(witness 全 0 失败)。
+  **六项闸门全部落定**(A/B 0.88× 否决 batch32,全量维持 batch16)⇒ 全量
+  (表 1 + 表 2 + attention 臂含 R1)可排产。⇒ 本阶段后续:全量排产决策。
+
 ---
 
 ## 一页对照表
@@ -140,3 +195,5 @@
 | 11-13 | 模拟忠实性 / τ-bench / bf16 一致性 | 模拟≡真 verifier;τ-bench 96.2/87.7%;bf16 不可模拟注意力 | `9d71967` `f93bd76` |
 | 11-14 | fp32 重测 + Phase A | attn-only 41.3%(fp32);Qwen3.5 可达集 ~3× 宽 | `7fb9fe4` `e0e9bfb` |
 | 11-15 | 尺寸阶梯 ASR | 82→81→66% 单调收缩;代际>尺寸 | `0fdf04b` |
+| 11-16 | P0(full-scale v1) | τ-bench v2(15+37,eligibility 程序化);协议定稿(null-k=5/fp32/预算统一);Llama patch;thinking 试跑判定保留;P1 表 1 开跑 | `956d7bc` `18046c7` `3f11a99` `9fe58c9` `99a0c1a` |
+| 11-17 | 先导集复核 + 修复 | 8B 双臂过闸 1–4(ASR−null +0.68/+0.52);32B-directed 超时重排(24h);Llama smoke 双根因修复(env PYTHONPATH / attach 判定);A/B 补排 | `c6dac77` `3c00b8e` |

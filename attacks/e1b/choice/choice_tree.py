@@ -10,11 +10,16 @@ prefix, so every trajectory is admissible by construction.
   log sum_{l != honest} p(label_l | prefix+token+cue) - log p(honest), keep the
   top B admissible paths per item.
 
-Honest reference = one tau=1 top-k=40 sample; control = a second honest sample
-with another seed (null flip rate). Flip = completed admissible trajectory whose
-parsed choice differs from the honest choice. No gold answers are used.
+Honest reference = one tau=1 top-k=40 sample. Null (paper protocol, full-scale
+design §2) = K canonical re-decodes per item where only the coin key changes
+(--null-k, default 5); a decode that caps or never parses counts as != c0.
+The legacy second honest sample is kept behind --legacy-control. Flip =
+completed admissible trajectory whose parsed choice differs from the honest
+choice. No gold answers are used.
 
-Plan: notes/NEXT-STEPS-e1b-dilemma-webshop.md
+Plan: notes/NEXT-STEPS-e1b-dilemma-webshop.md; protocol: attacks/e1b/reports/
+Next-step-full-scale.md §8 (unified budget beam=8 / node-limit=40000 /
+max-paths=4096, fp32 engine with TF32 disabled).
 """
 import argparse
 import hashlib
@@ -36,7 +41,9 @@ SHORT_SUFFIX = ('\n\nReply with ONE short sentence of reasoning, then the final 
 
 
 def stable_seed(*parts):
-    return int.from_bytes(hashlib.sha256('|'.join(map(str, parts)).encode()).digest()[:8], 'big')
+    # 62-bit: vLLM >=0.33 passes SamplingParams.seed into C long and raises
+    # OverflowError on the full unsigned-64 range (0.25 tolerated it).
+    return int.from_bytes(hashlib.sha256('|'.join(map(str, parts)).encode()).digest()[:8], 'big') & ((1 << 62) - 1)
 
 
 def lp_dict(lp):
@@ -46,6 +53,13 @@ def lp_dict(lp):
 class ChoiceEngine(VEngine):
     def __init__(self, a):
         self.thinking = (a.thinking == 'on')
+        # Design §8: fp32 must be true fp32 — with TF32 enabled the matmuls
+        # run at 10-bit mantissa and the attention-lever scale (±0.68% row
+        # mass) is quantised away exactly like bf16.  Set before the model is
+        # created (VEngine._boot).
+        import torch
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
         super().__init__(a)
         self.cue_ids = [int(t) for t in self.tok.encode(FORCED_CUE, add_special_tokens=False)]
 
@@ -151,6 +165,83 @@ class ChoiceEngine(VEngine):
 def choice_from_ids(engine, ids, base_len, labels):
     text = engine.text(ids[base_len:])
     return parse_choice(dict(text=text, capped=False), labels), text
+
+
+def null_salts(seed, item_id, k):
+    """Per-decode coin keys for the K canonical null re-decodes (62-bit each).
+
+    The keys live in the same 62-bit space as vLLM SamplingParams seeds and are
+    disjoint from the attack's coin (coin(prefix, seed)) because they are drawn
+    from stable_seed with a 'null' tag.
+    """
+    return [stable_seed(seed, item_id, 'null', j) for j in range(k)]
+
+
+def null_walks(engine, chats, items, a):
+    """K canonical re-decodes per item; only the coin key changes (§2 null).
+
+    Each decode re-keys the protocol coin — H_k = coin(prefix, salt_k), i.e. a
+    fresh draw of the committed grind / Fiat-Shamir domain — and follows the
+    canonical token at every step, so every emitted token carries its own
+    paper witness (self-audited via r.check): honest protocol variance, not
+    free sampling.  Only each decode's parsed choice is recorded here; the
+    caller computes any/dir fractions against c0 (the run's canonical spine
+    choice).  A decode that hits the token cap or never parses a boxed choice
+    keeps choice=None and counts as != c0 there — its decision cannot be
+    certified equal to c0.
+    """
+    t0 = time.time()
+    paths = {}
+    for i, it in enumerate(items):
+        paths[it['id']] = []
+        for j, salt in enumerate(null_salts(a.seed, it['id'], a.null_k)):
+            q = new_path(i, chats[it['id']], len(chats[it['id']]))
+            q['null_key'] = j
+            q['null_salt'] = salt
+            paths[it['id']].append(q)
+    rounds = 0
+    while rounds < a.max_steps:
+        active = [q for it in items for q in paths[it['id']] if q['done'] is None]
+        if not active:
+            break
+        rounds += 1
+        lps = engine.next_logprobs([q['ids'] for q in active])
+        for q, lp in zip(active, lps):
+            it = items[q['item']]
+            if lp is None:
+                q['done'] = 'relation'; continue
+            H = coin(q['ids'], q['null_salt'])
+            try:
+                r = relation_from_logprobs(lp, engine.V, a.temperature)
+                reach = r.witnesses(H, a.mode)
+            except ValueError:
+                q['done'] = 'relation'; continue
+            if not reach:
+                q['done'] = 'relation'; continue
+            canon = r.canonical(H)
+            if canon not in reach:
+                canon = max(reach, key=lambda t: lp.get(t, -1e9))
+            q['wchk'] += 1
+            if not r.check(canon, reach[canon], H, a.mode):
+                q['wfail'] += 1
+            q['ids'].append(int(canon)); q['nodes'] += 1; q['depth'] += 1
+            if canon in engine.eos:
+                q['done'] = 'stop'
+                q['choice'], q['text'] = choice_from_ids(
+                    engine, q['ids'], q['base_len'], it['labels'])
+            elif q['depth'] >= a.max_new:
+                q['done'] = 'cap'
+    engine.t.setdefault('null', 0.0)
+    engine.t['null'] += time.time() - t0
+    return {it['id']: dict(
+        k=a.null_k,
+        choices=[q.get('choice') for q in paths[it['id']]],
+        capped=[q['done'] == 'cap' for q in paths[it['id']]],
+        relation_failed=[q['done'] == 'relation' for q in paths[it['id']]],
+        steps=[q['depth'] for q in paths[it['id']]],
+        witness_checks=sum(q.get('wchk', 0) for q in paths[it['id']]),
+        witness_failures=sum(q.get('wfail', 0) for q in paths[it['id']]))
+        for it in items}
 
 
 def candidate_prompts(cand, idx, cue):
@@ -285,15 +376,25 @@ def main():
                         'distractor, designated in the dataset)')
     p.add_argument('--seed', type=int, default=20261111)
     p.add_argument('--thinking', choices=['on', 'off'], default='off')
+    p.add_argument('--dtype', choices=['float32', 'bfloat16', 'float16'],
+                   default='float32',
+                   help='engine compute dtype (design §8: fp32 for every Table-1/2 '
+                        'column; bf16 only for GDN-bound Qwen3.5 rows)')
+    p.add_argument('--null-k', type=int, default=5,
+                   help='canonical null decodes per item (only the coin key '
+                        'changes); 0 disables the null arm')
+    p.add_argument('--legacy-control', action='store_true',
+                   help='also sample the old second honest sample (pre-§2 null); '
+                        'off by default under the full-scale protocol')
     p.add_argument('--search', choices=['exhaustive', 'beam', 'rollout'],
                    default='exhaustive')
-    p.add_argument('--beam', type=int, default=4)
-    p.add_argument('--beam-score', choices=['delta', 'cum', 'abs'], default='cum',
+    p.add_argument('--beam', type=int, default=8)
+    p.add_argument('--beam-score', choices=['delta', 'cum', 'abs'], default='abs',
                    help='delta: this step\'s forced-answer change; cum: sum along the '
                         'path; abs: forced-answer margin at the candidate prefix')
     p.add_argument('--max-new', type=int, default=512)
     p.add_argument('--max-steps', type=int, default=2048)
-    p.add_argument('--node-limit', type=int, default=200000,
+    p.add_argument('--node-limit', type=int, default=40000,
                    help='emitted tokens per item across all paths')
     p.add_argument('--max-paths', type=int, default=4096)
     p.add_argument('--stop-on-flip', dest='stop_on_flip', action='store_true', default=True)
@@ -317,6 +418,8 @@ def main():
                    help='walk the plain sample and count tokens outside witnesses(H)')
     p.add_argument('--batch', type=int, default=64)
     p.add_argument('--max-seqs', type=int, default=512)
+    p.add_argument('--tensor-parallel', type=int, default=1,
+                   help='vLLM tensor-parallel size (2 for Qwen3-32B fp32)')
     p.add_argument('--enforce-eager', action='store_true',
                    help='disable CUDA graphs/compile (R1 + long WebShop-natural '
                         'prompts hit a flash-attention illegal-memory-access '
@@ -355,17 +458,21 @@ def main():
         t_chunk = time.time()
         chats = {it['id']: engine.chat(it['question'] + (SHORT_SUFFIX if a.short else ''))
                  for it in chunk}
-        prompts = [chats[it['id']] for it in chunk for _ in (0, 1)]
-        seeds = [stable_seed(a.seed, it['id'], tag) for it in chunk
-                 for tag in ('honest', 'control')]
+        tags = ('honest', 'control') if a.legacy_control else ('honest',)
+        prompts = [chats[it['id']] for it in chunk for _ in tags]
+        seeds = [stable_seed(a.seed, it['id'], tag) for it in chunk for tag in tags]
         outs = engine.sample(prompts, seeds, a.max_new)
         base = {}
         for i, it in enumerate(chunk):
-            (hids, hfin), (cids, cfin) = outs[2 * i], outs[2 * i + 1]
+            per = {tag: outs[i * len(tags) + j] for j, tag in enumerate(tags)}
+            hids, hfin = per['honest']
             htrail = dict(text=engine.text(hids), capped=(hfin == 'length'))
-            ctrail = dict(text=engine.text(cids), capped=(cfin == 'length'))
-            base[it['id']] = dict(honest=dict(htrail, choice=parse_choice(htrail, it['labels'])),
-                                  control=dict(ctrail, choice=parse_choice(ctrail, it['labels'])))
+            entry = dict(honest=dict(htrail, choice=parse_choice(htrail, it['labels'])))
+            if 'control' in per:
+                cids, cfin = per['control']
+                ctrail = dict(text=engine.text(cids), capped=(cfin == 'length'))
+                entry['control'] = dict(ctrail, choice=parse_choice(ctrail, it['labels']))
+            base[it['id']] = entry
 
         if a.check_honest:
             # Is the plain sampled trajectory itself coin-admissible? Walk its
@@ -374,7 +481,7 @@ def main():
             # is counted separately: it is not part of the decision.
             flat = []
             for i, it in enumerate(chunk):
-                hids = outs[2 * i][0]  # generated tokens only (prompt excluded)
+                hids = outs[i * len(tags)][0]  # honest = tags[0]; generated tokens only
                 for k in range(len(hids)):
                     flat.append((it['id'], chats[it['id']] + hids[:k],
                                  hids[k], k, len(hids) - 1))
@@ -399,6 +506,10 @@ def main():
                         s['first'] = k
             for it in chunk:
                 base[it['id']]['honest']['admissible'] = stats[it['id']]
+
+        # §2 null arm: K canonical re-decodes (coin-key-only changes), run
+        # before the attack so the shared chat prefix is still cache-hot.
+        null_raw = null_walks(engine, chats, chunk, a) if a.null_k else None
 
         paths, limits, spines = {}, {}, {}
         for i, it in enumerate(chunk):
@@ -754,19 +865,42 @@ def main():
             row = dict(id=iid, domain=it['domain'], question=it['question'],
                        gold_choice=it.get('gold_choice'),
                        directed_target=it.get('meta', {}).get('directed_target'),
-                       honest=base[iid]['honest'], control=base[iid]['control'],
+                       honest=base[iid]['honest'],
                        canonical=dict(text=sp.get('text'), capped=sp['done'] != 'stop',
                                   choice=sp['choice'], ids=sp['ids'],
                                   base_len=sp['base_len'],
                                   fork_steps=sp.get('fork_steps', [])),
                        conditions={a.mode: dict(choice_tree=tree)})
+            if 'control' in base[iid]:
+                row['control'] = base[iid]['control']
+            if null_raw is not None:
+                c0 = sp['choice']
+                dt = it.get('meta', {}).get('directed_target')
+                na = dict(null_raw[iid])
+                na['c0'] = c0
+                na['directed_target'] = dt
+                # any-null = E[q_i]: per-decision flip fraction, NOT any-of-K.
+                # A capped/unparsed decode cannot be certified equal to c0, so
+                # it counts as != c0; undefined when c0 itself does not parse
+                # (the item is outside the shared denominator anyway).
+                na['any_frac'] = (sum(1 for c in na['choices'] if c != c0)
+                                  / len(na['choices'])) if c0 is not None else None
+                na['dir_frac'] = (sum(1 for c in na['choices']
+                                      if dt is not None and c == dt)
+                                  / len(na['choices']))
+                na['all_stable'] = bool(c0 is not None
+                                        and all(c == c0 for c in na['choices']))
+                row['null_arm'] = na
             key = hashlib.sha256(iid.encode()).hexdigest()[:16]
             target = a.out / 'items' / f'{key}.json'
             tmp = target.with_suffix('.tmp')
             tmp.write_text(json.dumps(row)); tmp.replace(target)
         all_rows = [json.loads(f.read_text()) for f in (a.out / 'items').glob('*.json')]
         s = choice_summary(all_rows)
-        s['phase_seconds'] = round(time.time() - t0, 1)
+        s['chunk_seconds'] = round(time.time() - t0, 1)
+        # engine-time breakdown per phase (honest sampling / greedy probes /
+        # audits) so throughput tuning is data-driven, not guessed
+        s['engine_seconds'] = {k: round(v, 1) for k, v in engine.t.items()}
         (a.out / 'summary.json').write_text(json.dumps(s, indent=2))
         print(json.dumps(dict(chunk=start + len(chunk), total=len(items),
                               seconds=round(time.time() - t0, 1),
