@@ -197,3 +197,43 @@ worker1)数百分点级差异无法把 0.88 翻成 ≥1.2,判据明确不过。
 副产品:同题复算高度一致(parse 96.7% 持平、eligible 100/120、ASR-c₀ 0.850
 vs 0.826、null_any 0.134 vs 0.143、witness 0 失败)⇒ 协议跨节点/跨 batch
 设定可复现。后续全量作业保持默认 batch16/max-seqs512。
+
+## 先导集收口:τ-bench 预算阶梯 + 全部闸门判定(2026-11-18)
+
+**预算阶梯**(honest parse;每一环的失败项均为 capped=True,推理处于有效推进态):
+
+| --max-new | retail(37) | airline(15) |
+|---|---|---|
+| 2048 | 64.9%(any=directed) | 20% |
+| 4096 | 91.9%(any=directed) | 86.7%(any=directed) |
+| **6144** | **100% / 100%** | **100% / 100%** |
+
+⇒ τ-bench v2 统一预算 **--max-new 6144 --max-steps 6600**。截断性上限的语义保证:
+预算内完成的输出与更大预算下逐字节一致 ⇒ 阶梯各环互相自洽,2048/4096 各臂留作
+证据(`-maxnew2048` / `-mx4096` 目录)。
+
+**6144 终值**(Qwen3-8B,thinking on,fp32,beam8/abs/40000/4096,null-k=5,witness 0 失败):
+
+| 臂 | parse | eligible | 主结果 | null |
+|---|---|---|---|---|
+| retail any | 100% | 31/37 | ASR-c₀ 0.645 | null_any 0.135 |
+| retail directed | 100% | 36(dir_elig 35) | **asr_dir 0.714** | null_dir 0.006 |
+| airline any | 100% | 13/15 | ASR-c₀ 0.846 | null_any 0.086 |
+| airline directed | 100% | dir_elig 11 | **asr_dir 0.909** | null_dir 0.031 |
+
+**全部闸门判定**:
+1. honest 解析率 ≥95%:✓(6144 后四臂全 100%)
+2. eligible_c₀ ≥70%:✓(83.8% / 97.3% / 86.7% / 73.3%)
+3. null 合理性:✓(null ≪ ASR,逐题 witness 0 失败)
+4. 检验功效:✓(8B M2W 双臂 ASR−null CI 不含 0;τ-bench 各臂差值 0.51–0.88)
+5. τ-bench eligible 正常、directed 命中指定目标:✓(0.714 / 0.909)
+6. A/B:0.88× 不过 ⇒ 全量维持 batch16/max-seqs512(已判定,见上节)
+
+成本附注(gate 4 口径):τ-bench@6144 实测 425–561 s/题 = M2W 试跑外推
+(264 s)的 1.6–2.1× —— 非执行滑移,是数据集难度 + 预算上限的固有成本;
+τ-bench 全量按此重排预算(8B τ-bench 全四臂实测 ≈12.3 h)。
+
+⇒ **先导集六项闸门全部落定(含两次迭代:τ-bench 预算 2048→6144、A/B 否决),
+同设定全量(表 1 M2W 354 × 5 模型 + 表 2 τ-bench v2 52 × {any,directed},
+attention 臂含 R1-Llama)可排产。** 两台 worker 现均空闲;32B-any 全量行
+(p1-table1,32/354,resume)待人工放行后可即刻续跑。
