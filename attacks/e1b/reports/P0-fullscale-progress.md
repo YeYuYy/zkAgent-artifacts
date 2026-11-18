@@ -272,3 +272,23 @@ sample×{any,dir}(全量)、32B×M2W sample×{any,dir}(n=32)——共 6 cell。
 排产次序(贵/新优先):32B×τ-bench decode → 32B attn(M2W,TP2)→ R1 全臂
 (新家族+eager)→ 14B → 4B → Q35-9B → 表 3/5 小样。v1 六闸门结论对 v2 仍有效
 (协议未变,只是覆盖面补全);v2 各 cell 复用同一闸门判据。
+
+## p1t1(表 1 先导切片)开跑(2026-11-18 晚)
+
+**资源**:4 卡 = `exp-agent-p1t1-w1`(1×H200,4B/14B decode+attn)+ `w2tp`
+(2×H200 TP2,32B decode/freer/attn)+ `w3`(1×H200,free-r + 8B attn);作业名
+按用户偏好用 exp-agent 前缀(工作不变)。
+
+**Block A(decode/sample 缺口,16 跑)**:4B/14B × {M2W n=16, ret n=8, air n=4}
+× {any,dir};32B × τ-bench(ret 8/air 4)× {any,dir}。
+**Block B(free-r 计费/inflation,12 跑)**:4 模型 × 3 数据切片,32B 在 w2。
+**Block C(attention,44 跑)**:{attn-only, attn+decode} × {any,dir} × 4 模型 ×
+3 数据切片;32B 因 TP2 成本削减为 n=8/5/3,其余 n=12/8/4。
+
+**choice_tree_attn.py 协议移植(先决项,已完成)**:新增 `--null-k`(§2 null 臂,
+K 次换币 canonical 重解码,复用 choice_tree.null_walks;插入在 honest 采样后、
+sign 优化前,sign 缓冲保持全零)与 `--tensor-parallel`(VEngine 已支持,透传);
+行级 `null_arm`(any_frac/dir_frac/all_stable,c₀ 同 choice_tree 口径)+ summary
+`engine_seconds`。choice_summary 对 null_arm 的聚合为通用路径,无需改动。
+stub/单测与既有套件全过(py_compile + attn_slack 9/9 + report stats + choice_tree 14)。
+快照 `9a51d986606b`。累计队列:w1 35 / w2 18 / w3 20,预计 ~2 天墙钟。

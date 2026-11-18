@@ -34,7 +34,8 @@ import numpy as np
 from experiments import attn_slack_vllm as slack
 from experiments.choice_scoring import choice_summary, parse_choice
 from experiments.choice_tree import (ChoiceEngine, choice_from_ids, item_result,
-                                     lp_dict, new_path, spawn_path, stable_seed)
+                                     lp_dict, new_path, null_walks, spawn_path,
+                                     stable_seed)
 from experiments.relation import coin
 from experiments.vllm_bestofn import relation_from_logprobs
 
@@ -482,6 +483,9 @@ def main():
                    default='attn-only')
     p.add_argument('--mode', choices=['paper', 'free-r'], default='paper')
     p.add_argument('--objective', choices=['any', 'directed'], default='any')
+    p.add_argument('--null-k', type=int, default=5,
+                   help='canonical null decodes per item (coin-key-only, §2); '
+                        '0 disables the null arm')
     p.add_argument('--beam', type=int, default=8)
     p.add_argument('--beam-score', choices=['delta', 'cum', 'abs'], default='cum',
                    help='abs ranks each path by its own forced-answer margin '
@@ -505,6 +509,8 @@ def main():
     p.add_argument('--max-paths', type=int, default=4096)
     p.add_argument('--batch', type=int, default=8)
     p.add_argument('--max-seqs', type=int, default=512)
+    p.add_argument('--tensor-parallel', type=int, default=1,
+                   help='vLLM tensor-parallel size (2 for Qwen3-32B fp32)')
     p.add_argument('--dtype', choices=['bfloat16', 'float32'], default='bfloat16',
                    help='engine dtype; float32 is the circuit-faithful setting '
                         'for the +-0.68% attention lever (bf16 cannot resolve '
@@ -569,6 +575,11 @@ def main():
                                                                           it['labels'])),
                                   control=dict(ctrail, choice=parse_choice(ctrail,
                                                                             it['labels'])))
+        # §2 null arm: K canonical re-decodes (coin-key-only changes) under a
+        # canonical sign buffer, before Phase B — shared chat prefix cache-hot,
+        # and the sign state is still all-zero at this point in the chunk.
+        slack.set_signs(None)
+        null_raw = null_walks(engine, chats, chunk, a) if a.null_k else None
         # Phase A: canonical spines (config 0)
         spines0 = walk_spines(engine, chats, a, chunk)
         # Phase B: per-item (or per-chunk) sign matrices at the decision point
@@ -623,6 +634,24 @@ def main():
                                       fork_steps=sp.get('fork_steps', [])),
                        conditions={f'{a.arm}|{a.mode}|{a.objective}':
                                    dict(choice_tree=tree)})
+            if null_raw is not None:
+                c0 = sp['choice']
+                dt = it.get('meta', {}).get('directed_target')
+                na = dict(null_raw[iid])
+                na['c0'] = c0
+                na['directed_target'] = dt
+                # any-null = E[q_i]: per-decision flip fraction, NOT any-of-K.
+                # A capped/unparsed decode cannot be certified equal to c0, so
+                # it counts as != c0; undefined when c0 itself does not parse
+                # (same denominator convention as choice_tree.py).
+                na['any_frac'] = (sum(1 for c in na['choices'] if c != c0)
+                                  / len(na['choices'])) if c0 is not None else None
+                na['dir_frac'] = (sum(1 for c in na['choices']
+                                      if dt is not None and c == dt)
+                                  / len(na['choices']))
+                na['all_stable'] = bool(c0 is not None
+                                        and all(c == c0 for c in na['choices']))
+                row['null_arm'] = na
             key = hashlib.sha256(iid.encode()).hexdigest()[:16]
             target = a.out / 'items' / f'{key}.json'
             tmp = target.with_suffix('.tmp')
@@ -630,6 +659,7 @@ def main():
         all_rows = [json.loads(f.read_text()) for f in (a.out / 'items').glob('*.json')]
         s = choice_summary(all_rows)
         s['phase_seconds'] = round(time.time() - t0, 1)
+        s['engine_seconds'] = {k: round(v, 1) for k, v in engine.t.items()}
         (a.out / 'summary.json').write_text(json.dumps(s, indent=2))
         print(json.dumps(dict(chunk=start + len(chunk), total=len(items),
                               seconds=round(time.time() - t0, 1),
