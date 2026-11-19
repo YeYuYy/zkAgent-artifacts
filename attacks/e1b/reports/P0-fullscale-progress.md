@@ -292,3 +292,20 @@ sign 优化前,sign 缓冲保持全零)与 `--tensor-parallel`(VEngine 已支持
 `engine_seconds`。choice_summary 对 null_arm 的聚合为通用路径,无需改动。
 stub/单测与既有套件全过(py_compile + attn_slack 9/9 + report stats + choice_tree 14)。
 快照 `9a51d986606b`。累计队列:w1 35 / w2 18 / w3 20,预计 ~2 天墙钟。
+
+## 更正:free-r 误入先导集(2026-11-20,人工指出)
+
+**错误**:p1t1 的 Block B 把表 1 的 inflation 列擅自操作化为 `--mode free-r`
+并跑了 12 个臂。设计文档 §2 明确写明 **"free-r(实现特定)结果不进主表,
+只在 appendix 保留"**;且 §5 的计费是**尚未实现的新机制**(EOS-logit 高时
+稀疏触发 attention 干预、cap ≥8192 放大膨胀倍数、需小规模试跑),与旧
+free-r(放币续写)不是一回事 —— 用旧工具顶替新设计是越权决定。
+
+**处置**:
+- 12 个 `-freer` 臂(`runs-choice/p1t1-pilot/*-freer`)全部已完成、无在途/排队
+  作业;数据保留但**标记为 appendix 口径**,不进先导集闸门复核,不进表 1。
+- p1t1 的"73 跑"口径更正为 **61 跑**(主表 cell);完成度按 61 计。
+- §5 计费机制(EOS 触发 + cap 8192 试跑)列回**未实现的待办**,回到
+  "full-scale 前需单独设计+小规模试跑"状态,不计入本轮先导集。
+- 教训已记录:设计文档术语不得静默映射到现有 harness 模式;无实现的
+  设计元素按"未建成"上报,不用形似物顶替。
