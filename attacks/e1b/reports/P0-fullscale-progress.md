@@ -346,3 +346,6 @@ appendix,不计入)。attention 臂 48 跑为**新协议下首批 attention 数�
 **结论**:表 1 的全部 cell 类型(模型×数据×臂×目标)在新协议下均有数据、
 均过闸(除 14B M2W parse 单点,修正已定)。**全量表 1 可排产;表 2 先导切片
 (Qwen3.5-9B decode + R1 全臂)待跑**——Qwen3.5-9B 模型尚未下载。
+
+**汇总表**:`reports/p1t1-pilot-results.md`(表 1 先导切片全矩阵,ASR/null/Δ,
+含 v1 大-n 臂;生成器口径与闸门一致)。
