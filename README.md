@@ -41,6 +41,20 @@ python3 quant/prepare_gpt2_quant.py \
 The download script also saves the tokenizer files. If `vocab.json` and
 `merges.txt` are missing from the model directory, copy them from `backup/`.
 
+Without PyTorch, download the safetensors checkpoint directly and export it
+with NumPy (`pip install numpy safetensors`):
+
+```bash
+mkdir -p model/gpt2-124m
+for f in config.json model.safetensors vocab.json merges.txt; do
+  curl -fL -o model/gpt2-124m/$f \
+    https://huggingface.co/openai-community/gpt2/resolve/main/$f
+done
+python3 scripts/export_gpt2_safetensors.py model/gpt2-124m
+```
+
+Then run `quant/prepare_gpt2_quant.py` as above.
+
 ## 3. Build
 
 Compile the benchmark executables.
