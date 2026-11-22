@@ -349,3 +349,93 @@ appendix,不计入)。attention 臂 48 跑为**新协议下首批 attention 数�
 
 **汇总表**:`reports/p1t1-pilot-results.md`(表 1 先导切片全矩阵,ASR/null/Δ,
 含 v1 大-n 臂;生成器口径与闸门一致)。
+
+## p1t1x:统一 n 扩展(2026-11-21,人工决定 + 执行中)
+
+**用户决定**:先导切片各模型 n 不齐(M2W 实际为 {8,12,16,32,120} 五种,
+τ 切片 attn/decode 也各异)不可比;统一为 **M2W n=36(10.2%)、τ-retail n=8、
+τ-airline n=4**,同一数据集内所有模型×臂×目标同 n、同前缀(`--limit` 语义即
+前 N 题)。8B decode 大-n 臂(120/37/15)超额覆盖,报告时截前 N;不重跑。
+
+**执行**(30 跑,4 卡 = w1 复用 + `exp-agent-p1t1x-w2tp`(TP2)/`-w3` 重拉,
+快照 `9a51d986606b`,全部已入队,预计 ~1 天):
+- 复制式扩展 24 跑:旧 items/ 拷入新目录(`-n36/-n8/-n4` 后缀;limit 属于
+  config.json,原目录改 limit 会触发 mismatched-resume 守卫),增量题
+  4B/8B/14B attn M2W 12→36、4B decode 16→36、32B M2W decode 32→36 /
+  attn 8→36、32B τ attn 5→8(ret)/3→4(air)。
+- **14B M2W 全新 6 跑 @3072/3300**(`-mx3072-n36`,不拷贝):旧 2048 臂每臂
+  恰 1 题 honest capped(92–94% parse),且 3072 从未实跑过——新跑兼作全量
+  3072 预算的校准点。非 14B 模型 M2W 维持 2048(截断性语义:预算内完成逐字节
+  一致,且这些臂 honest capped=0,提预算不改变任何已跑题结果)。
+- 14B 以外臂扩展沿用原预算(τ 6144/6600、M2W 2048/2200)。
+
+**口径更正(重要,影响与旧汇总表的可比性)**:复核发现
+`p1t1-pilot-results.md` 的生成器用的是 **v1 eligible(honest parse ∧ c₀ parse
+∧ 两者一致)做分母,directed 列的 null 恒为 null_any**——与闸门复核/choice_report
+的 c₀ 口径不一致。例:8B M2W any 分母 100(v1)vs 115(c₀);32B M2W directed
+11/24(v1)vs directed_success∧tgt≠c₀ 14/26(c₀);其 directed 列 null 0.19 实为
+null_any,null_dir 为 0.100。v1 分母丢弃不稳定题(本应由 null 吸收)且向
+稳定幸存者偏置。**统一 n 表将按锁定协议口径生成**(c₀-elig;directed 分母
+tgt≠c₀、hit=terminal 落 target、null=null_dir;Δ 逐题配对 bootstrap),any 列
+在两种口径重合处与旧表逐字一致(已验证 4B τ-ret any 7/8、null 0.125)。
+
+**elig ≠ n 的来源(顺带答用户问)**:① honest parse(截断 capped 为主因,
+τ@2048 64.9%/20% → 6144 修复;14B M2W@2048 92–94% → 3072 修复中);
+② c₀ parse(canonical 决策未解析;注意可高于 honest parse——14B M2W
+c₀=16 > parse=15,协议保留此类题);③ directed 列剔除 tgt==c₀ 题
+(落 c₀ 非翻转,9fe58c9);④ 旧表额外的 v1 一致性过滤(见上,新表去除)。
+
+## 预算决定:max-new 8192 全表统一(2026-11-21,人工拍板)
+
+**路径 B(消灭不可eligible的成因)而非路径 A(把不可测题计 0 分)**:
+实测 283 题中 17/17 个非 eligible 全部是 canonical 回放被 max-new 截断
+(格式失败为 0)——纯预算产物。max-new 是纯上限(预算内完成的题逐字节
+一致、耗时不变),提预算只对会截断的题加时。**全量表统一
+`--max-new 8192 --max-steps 8800`**(τ-retail 最长 prompt ≈5k tok + 8192
+≈ 13–14k « 32k 上下文;τ@6144 已同包络跑通)。elig 概念从 any 列消失,
+闸门改为「0 capped」。残余不可去除:格式失败(实测 ~0)与 directed 的
+tgt==c₀ 剔除(定义性,非成本问题)。
+
+**先导表第二波(8192 补齐,wave-1 完成后)**:截断性语义 ⇒ 未截断题在
+8192 下逐字节等价,直接复用;仅重跑首 N 题中**任一分量 capped** 的题
+(honest / canonical / 任一 null 解码;null 截断现为人工翻转,4B/8B M2W
+每臂 3–4/12 题,重跑后 null 更净、Δ 略升——诚实方向)。预计 18 个小作业
+(32B M2W 全臂 0 capped,零重跑),+10–20 GPU 时。此后先导表 =
+统一 n **且** 统一 8192 上限。
+
+**执行小故障(11-21 已修)**:32B M2W decode 双臂首排 rc=1——enqueue
+脚本 decode 分支漏传 `--tensor-parallel 2`,32B fp32 单卡加载(122 GiB)
+⇒ KV cache −0.44 GiB 引擎起不来(attn 臂不受影响,choice_tree_attn 默认
+eager 且 flag 正确)。旧史里同款失败也出现过一次(656ffd49,后被 6h
+kill 掩盖)。处置:删两目录误写 config.json(items 未动,各 32 题完好)、
+补上 TP2 重排、监控起点后移避开旧失败记录。
+
+## p1t1x 收口(2026-11-22)
+
+**完成度**:wave-1 30 跑 + wave-2 16 跑全部 COMPLETE(合计 46 跑;
+~1.5 天墙钟,4 卡;除上述 TP2 双跑重排外 0 失败)。**统一 n + 统一 8192
+上限的表 1 先导切片就绪**:`reports/p1t1-uniform-results.md`(替代
+`p1t1-pilot-results.md` 作为汇总引用;旧表存档留作口径追溯)。
+
+**关键结果**:
+- **eligibility 在 any 列消失**:24/24 any 格 parse=100%、capped=0、
+  elig=n。directed 分母只剩 tgt≠c₀(M2W 剔 5–9/36)。8192 补齐实测回收:
+  4B M2W any 25/32→29/36、8B τ-air any 3/3→4/4;wave-2 目录 563 题复核
+  witness 0 失败、null capped 0、relation_failed 0。
+- **14B M2W@3072 六臂 36 题 0 capped** ⇒ 全量 14B 预算定档 3072(实测
+  依据),其余 8192/8800。
+- **主形态(统一 n 下与 v1 一致且更净)**:attn+decode 21/24 格最强
+  (Δ +0.36…+1.00);32B attn-only 塌缩(M2W −0.07,τ 全 0)⇒「仅组合
+  可攻」regime 确认;τ-air-directed 的 decode 免疫切片(4B/14B/32B
+  decode 0/4)在组合臂翻 4/4、4/4、3/4;32B τ-ret decode 仅 +0.10
+  (null 0.28)而组合 +0.53/+0.86。
+- 成本注:wave-2 仅 94 题重跑(≈17 GPU 时)——8192 全表预算的代价
+  佐证:截断性语义下增量成本 ≈ 截断尾部长度。
+
+**生成器与可复现**:`choice/gen_table.py`(本库)口径 = c₀-elig +
+directed tgt≠c₀ + null_dir + 逐题配对 bootstrap;源臂映射:8B decode
+用 p1-pilot 大-n 臂截前 N,wave-2 目录(`-mx8192`)COMPLETE 优先。
+
+**下一步(待人工确认)**:表 2 先导切片(Qwen3.5-9B decode + R1 全臂;
+Qwen3.5-9B 模型未下载)→ 之后全量表 1(354/52)按 8192/8800、14B M2W
+3072 排产。
